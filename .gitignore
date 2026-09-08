@@ -1,0 +1,49 @@
+# ==============================================================================
+# Mogok Maung — root .gitignore
+# ==============================================================================
+
+# --- Secrets & environment (NEVER commit) -------------------------------------
+.env
+.env.*
+!.env.example
+.aws/credentials
+*.pem
+*.key
+!*.key.tf
+
+# --- Terraform state & plan files ----------------------------------------------
+infrastructure/terraform/.terraform/
+infrastructure/terraform/*.tfstate
+infrastructure/terraform/*.tfstate.*
+infrastructure/terraform/terraform.tfvars
+infrastructure/terraform/crash.log
+deploy/nginx/conf.d/admin-dashboard.conf.real
+deploy/nginx/conf.d/api-admin-lockdown.conf.real
+
+# --- Go ----------------------------------------------------------------------
+bin/
+*.test
+coverage.out
+
+# --- Web (Next.js) -------------------------------------------------------------
+web/node_modules/
+web/.next/
+web/out/
+
+# --- Flutter / mobile -----------------------------------------------------------
+mobile/build/
+mobile/.dart_tool/
+mobile/android/.gradle/
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+
+# --- Local tooling ----------------------------------------------------------------
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.exe
+*.zip
+*.rar

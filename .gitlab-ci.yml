@@ -1,0 +1,90 @@
+# ==============================================================================
+# GitLab CI — Staging deployment pipeline for the Mogok Maung backend.
+#
+# Runner requirements:
+#   * The deploy job MUST run on a runner exposing the Docker socket so the
+#     compose stack publishes to the SAME localhost the script probes
+#     (health check http://localhost:8080/api/v1/health) -> use a Docker
+#     executor runner ON the staging EC2 (or shell executor with docker).
+#     Do NOT use the DinD service here (published ports would live on the
+#     ephemeral dind host, not the runner).
+#   * aws CLI + curl installed on the deploy runner (script pre-flights them).
+#
+# CI/CD variables (Settings > CI/CD > Variables, masked):
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   (ECR: GetAuthorizationToken + pull)
+#   ECR_REGISTRY                                (e.g. 123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/mm-bet)
+#   STAGING_POSTGRES_PASSWORD
+#   STAGING_JWT_SECRET
+#
+# Pipeline: test -> push (build:once, tag x3, push to ECR) -> deploy (manual)
+# ==============================================================================
+stages:
+  - test
+  - push
+  - deploy
+
+variables:
+  AWS_REGION: ap-southeast-1
+  IMAGE_TAG: latest-staging
+
+default:
+  tags:
+    - docker       # runner with a working docker daemon/socket
+
+# ---------------------------------------------------------------------------
+# 1. Go build/vet/unit tests
+# ---------------------------------------------------------------------------
+test:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - apk add --no-cache git
+    - go vet ./...
+    - go build ./...
+    - go test ./pkg/...
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging" || $CI_COMMIT_BRANCH == "main"'
+
+# ---------------------------------------------------------------------------
+# 2. Build once, tag x3 (api/worker/webhook), push to ECR
+# ---------------------------------------------------------------------------
+push:
+  stage: push
+  image: docker:27.5
+  before_script:
+    - apk add --no-cache curl unzip
+    - curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp
+    - /tmp/aws/install --update
+    - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  script:
+    - ./deploy/ecr-push.sh
+  variables:
+    ECR_REGISTRY: ${ECR_REGISTRY}
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging" || $CI_COMMIT_BRANCH == "main"'
+
+# ---------------------------------------------------------------------------
+# 3. Deploy the stack + seed sample data (manual gate)
+# ---------------------------------------------------------------------------
+deploy-staging:
+  stage: deploy
+  image: docker:27.5
+  environment: staging
+  variables:
+    ECR_REGISTRY: ${ECR_REGISTRY}
+    STAGE_ENV: staging
+    POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD}
+    JWT_SECRET: ${STAGING_JWT_SECRET}
+  before_script:
+    - apk add --no-cache curl unzip
+    - curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+    - unzip -q /tmp/awscliv2.zip -d /tmp
+    - /tmp/aws/install --update
+    - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  script:
+    - chmod +x deploy/deploy-staging.sh
+    - ./deploy/deploy-staging.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging" || $CI_COMMIT_BRANCH == "main"'
+      when: manual

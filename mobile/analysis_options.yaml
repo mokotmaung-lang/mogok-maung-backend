@@ -1,0 +1,20 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # Riverpod/Freezed-style generated code is not used yet; keep strict on
+    # real issues but do not fail the build on missing_field docs.
+    missing_required_param: warning
+    missing_return: error
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+
+linter:
+  rules:
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    avoid_unnecessary_containers: true
+    prefer_single_quotes: true
+    use_key_in_widget_constructors: true

@@ -1,0 +1,123 @@
+name: Deploy Backend
+
+# Zero-downtime rolling deploy: push to main -> go checks -> ECR push
+# (sha + latest) -> render task def with the new image -> ECS service update
+# (rolling, old tasks drained only once the new ones pass /health).
+#
+# IDs: OIDC role assumption (NO long-lived access keys committed), per the
+# production-security baseline.
+#
+# NOTE vs. earlier draft plan: infra (cluster/ALB/RDS/Redis) is owned by
+# terraform in `infrastructure/terraform`. App deploys use the ECS-native
+# render+deploy actions so terraform never fights the action over the task
+# definition. On AWS: ecs: RegisterTaskDefinition, UpdateService, PassRole.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pkg/**'
+      - 'cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'migrations/**'
+      - 'Dockerfile'
+      - '.aws/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: mm-bet-api
+  ECS_SERVICE: user-service
+  ECS_CLUSTER: mm-bet-prod-cluster
+  ECS_TASK_DEFINITION: .aws/user-service-task.json
+  CONTAINER_NAME: user-service
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    name: Build / Vet / Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Go vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Unit tests (settlement + wallet engines)
+        run: go test ./pkg/...
+
+  push:
+    name: Build and Push Image to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Docker context is the REPO ROOT (this repo is the Go module; the API
+      # entrypoint is ./cmd/api — there is no ./services/user-service).
+      - name: Build, Tag, and Push
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+                       -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Rolling Deploy to Fargate (zero downtime)
+    needs: push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.push.outputs.image }}
+
+      - name: Deploy Amazon ECS Task Definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Asset scan (bedrock)
+        if: always()
+        run: echo "Deploy finished (job result: ${{ job.status }}). Next: verify /health and ledger invariants."

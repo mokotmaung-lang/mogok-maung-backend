@@ -1,0 +1,137 @@
+// Mogok Maung (မိုးကုတ်မောင်း) — Prisma Schema (PostgreSQL)
+//
+// Master Prompt Blueprint 1 — Immutable Ledger + Multi-Tenancy hierarchy.
+//
+// Double-spending / race-condition protection:
+//   * Wallet balances are ONLY ever modified inside a $transaction together
+//     with an appended WalletTransaction row (balanceBefore/balanceAfter).
+//   * A bare UPDATE on User.balance without a ledger entry is a bug.
+//   * Strict PostgreSQL isolation (SERIALIZABLE) RULE for settlement jobs.
+//
+// Production DDL (with runtime indexes) lives in Go migrations under
+// /migrations; this file mirrors the ERD for Prisma/ERD tooling.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  AGENT
+  USER
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  BET_PLACED
+  BET_WIN
+  BET_REFUND
+  COMMISSION
+}
+
+enum BetStatus {
+  PENDING
+  WON
+  HALF_WON
+  LOST
+  HALF_LOST
+  DRAW
+  CANCELLED
+}
+
+model User {
+  id                String              @id @default(uuid())
+  username          String              @unique
+  phone             String              @unique
+  passwordHash      String
+  role              Role                @default(USER)
+  balance           Float               @default(0.0)
+  agentId           String?
+  agent             User?               @relation("AgentDownline", fields: [agentId], references: [id], onDelete: SetNull)
+  downlines         User[]              @relation("AgentDownline")
+  walletLedger      WalletTransaction[]
+  betSlips          BetSlip[]
+  pointRequestsFrom PointRequest[]      @relation("UserRequests")
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@index([agentId])
+  @@index([phone])
+}
+
+// Immutable financial audit trail. amount is signed: positive credits,
+// negative debits. referenceId ties the row to a BetSlip or PointRequest.
+model WalletTransaction {
+  id            String          @id @default(uuid())
+  userId        String
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount        Float           // Positive (+) for Credits, Negative (-) for Debits
+  balanceBefore Float
+  balanceAfter  Float
+  type          TransactionType
+  referenceId   String?         // Links to BetSlip ID or PointRequest ID
+  remark        String?
+  createdAt     DateTime        @default(now())
+
+  @@index([userId])
+  @@index([referenceId])
+}
+
+model Fixture {
+  id         String      @id @default(uuid())
+  homeTeam   String
+  awayTeam   String
+  leagueName String
+  matchTime  DateTime
+  isLive     Boolean     @default(false)
+  isClosed   Boolean     @default(false)
+  homeScore  Int         @default(0)
+  awayScore  Int         @default(0)
+  bodyOdds   String      // e.g., "1+25", "-36", "0-50"
+  overUnder  String      // e.g., "2-50", "3+70"
+  streamUrl  String?     // HLS Stream (.m3u8)
+  betDetails BetDetail[]
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+}
+
+model BetSlip {
+  id           String      @id @default(uuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isMixParlay  Boolean     @default(false) // false = Body (Single), true = Maung (Mix Parlay)
+  stakeAmount  Float
+  potentialWin Float
+  status       BetStatus   @default(PENDING)
+  betDetails   BetDetail[]
+  createdAt    DateTime    @default(now())
+
+  @@index([userId])
+}
+
+model BetDetail {
+  id        String    @id @default(uuid())
+  betSlipId String
+  betSlip   BetSlip   @relation(fields: [betSlipId], references: [id], onDelete: Cascade)
+  fixtureId String
+  fixture   Fixture   @relation(fields: [fixtureId], references: [id])
+  selection String    // "HOME", "AWAY", "OVER", "UNDER"
+  oddsLine  String    // Odds line at the moment of bet placement
+  status    BetStatus @default(PENDING)
+}
+
+model PointRequest {
+  id        String          @id @default(uuid())
+  userId    String
+  user      User            @relation("UserRequests", fields: [userId], references: [id])
+  amount    Float
+  type      TransactionType // DEPOSIT or WITHDRAWAL
+  status    String          // PENDING, APPROVED, REJECTED
+  createdAt DateTime        @default(now())
+}

@@ -1,0 +1,45 @@
+# ==============================================================================
+# docker-compose.staging.yml — Staging override.
+#
+# Used by deploy/deploy-staging.sh on the AWS staging EC2 host. Overlays the
+# base docker-compose.yml so the three application containers run from ECR
+# images (tagged :latest-staging) instead of a local build.
+#
+# Image / binary mapping (this repo builds ONE repo-root image set; the
+# spec's "admin-service" is served by the API image's /api/v1/admin/* routes):
+#   spec user-service          -> image mogok-maung-api     (cmd/api)
+#   spec admin-service         -> image mogok-maung-api     (same binary)
+#   spec bet-settlement-worker -> image mogok-maung-worker  (cmd/worker)
+#   (bonus) bot webhook worker -> image mogok-maung-webhook (cmd/webhook, :8090)
+#
+# `build: !reset` drops the base file's build context so compose only uses the
+# image. This tag requires Docker Compose >= 2.20 (checked by the deploy script).
+#
+# Env required (in .env or exported): ECR_REGISTRY, IMAGE_TAG.
+# ==============================================================================
+
+services:
+  # --- API / user-service (+ admin + agent control plane) ---------------------
+  user-service:
+    image: ${ECR_REGISTRY}/mogok-maung-api:${IMAGE_TAG}
+    build: !reset
+    environment:
+      # Staging marker for observability; app behaviour is unchanged.
+      STAGE_ENV: ${STAGE_ENV:-staging}
+    healthcheck:
+      # alpine busybox wget — same probe the Dockerfile uses on /health.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+
+  # --- Settlement worker (spec bet-settlement-worker) -------------------------
+  settlement-worker:
+    image: ${ECR_REGISTRY}/mogok-maung-worker:${IMAGE_TAG}
+    build: !reset
+
+  # --- Bot webhook worker (Viber/Telegram deposits) ---------------------------
+  bot-webhook-worker:
+    image: ${ECR_REGISTRY}/mogok-maung-webhook:${IMAGE_TAG}
+    build: !reset

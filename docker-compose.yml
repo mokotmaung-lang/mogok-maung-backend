@@ -1,0 +1,181 @@
+# ==============================================================================
+# Local / staging orchestration for the Mogok Maung platform.
+#
+# NOTE (dev vs spec): the original spec built from an imagined `./user-service`
+# folder. This repo root IS the Go module (pkg/, cmd/, go.mod) and the API
+# entrypoint is ./cmd/api, so the build context is '.'. container_name from the
+# spec is preserved.
+#
+# Credentials are injected from the environment (never committed):
+#   copy .env.example -> .env and fill POSTGRES_PASSWORD, JWT_SECRET
+#   docker compose up --build
+#
+# Production uses AWS RDS (PITR/Multi-AZ, see scripts/dr) + ElastiCache Redis;
+# THIS compose file is for fast local integration and CI smoke tests.
+# ==============================================================================
+
+services:
+  # 1. Primary PostgreSQL (development instance)
+  postgres-db:
+    image: postgres:16-alpine
+    container_name: mm_bet_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bet_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-myanmar_bet_prod}
+    ports:
+      - "5432:5432"          # exposed for local tooling only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # NOTE: schema is applied by the app itself at boot (AUTO_MIGRATE=true,
+      # advisory-locked, see pkg/database/migrate.go) — no initdb mount needed.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bet_admin} -d ${POSTGRES_DB:-myanmar_bet_prod}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bet_internal_network
+
+  # 2. Redis for live-odds cache + WS pub/sub fan-out
+  redis-cache:
+    image: redis:7-alpine
+    container_name: mm_bet_redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # deliberately NOT port-exposed publicly; gateway talks over the network
+    networks:
+      - bet_internal_network
+
+  # 2b. RabbitMQ for match-result settlement events (durable queue).
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    container_name: mm_bet_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    ports:
+      - "5672:5672"            # exposed for local tooling only
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bet_internal_network
+
+  # 3. Go User API
+  user-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mm_bet_user_api
+    ports:
+      - "8080:8080"
+    environment:
+      DB_HOST: postgres-db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-bet_admin}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-myanmar_bet_prod}
+      DB_SSLMODE: disable
+      PORT: "8080"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      REDIS_HOST: redis-cache
+      AUTO_MIGRATE: "true"
+      MIGRATIONS_DIR: /app/migrations
+      AMQP_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      SETTLEMENT_QUEUE: ${SETTLEMENT_QUEUE:-match_settlement_queue}
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 3b. Settlement worker: consumes match_settlement_queue and settles PENDING
+  # Maung/Body bets ACID-ly (see pkg/worker/settlement.go). Stays behind the
+  # API so the schema is migrated before it reads.
+  settlement-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mm_bet_settlement_worker
+    command: ["mogok-maung-worker"]
+    environment:
+      DB_HOST: postgres-db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-bet_admin}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-myanmar_bet_prod}
+      DB_SSLMODE: disable
+      AMQP_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      SETTLEMENT_QUEUE: ${SETTLEMENT_QUEUE:-match_settlement_queue}
+      SETTLEMENT_PREFETCH: "10"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    # The baked-in Dockerfile HEALTHCHECK probes :8080, but the worker is not an
+    # HTTP server — disable it or compose would always report it unhealthy.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 3c. Bot webhook worker: receives Viber/Telegram "DEPOSIT/Withdraw" messages
+  # on :8090, verifies the platform signature, maps sender -> user via
+  # bot_links, inserts audit-trailed PENDING unit_requests and pushes the event
+  # to agent_unit_request_queue (agent dashboard consumes it for realtime push).
+  bot-webhook-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mm_bet_bot_webhook
+    command: ["mogok-maung-webhook"]
+    ports:
+      - "8090:8090"
+    environment:
+      DB_HOST: postgres-db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-bet_admin}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-myanmar_bet_prod}
+      DB_SSLMODE: disable
+      HTTP_ADDR: ":8090"
+      AMQP_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672/
+      AGENT_UNIT_REQUEST_QUEUE: ${AGENT_UNIT_REQUEST_QUEUE:-agent_unit_request_queue}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      VIBER_AUTH_TOKEN: ${VIBER_AUTH_TOKEN:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    # Not an HTTP server (listens on :8090 only) — see settlement-worker note.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+volumes:
+  pgdata:
+  redisdata:
+  rabbitmqdata:
+
+networks:
+  bet_internal_network:
+    driver: bridge

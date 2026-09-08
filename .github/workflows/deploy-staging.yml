@@ -1,0 +1,120 @@
+name: Deploy Staging (EC2 + Compose)
+
+# Staging deployment of the full stack onto the staging EC2 host using
+# deploy/deploy-staging.sh (ECR auth -> pull -> down -v -> up -d --build ->
+# /api/v1/health retry -> mock_data.sql seed).
+#
+# Runner topology:
+#   * test + push  -> hosted ubuntu-latest (fast, disposable)
+#   * deploy       -> SELF-HOSTED runner registered with labels
+#                     [self-hosted, linux, x64, staging] ON the EC2 staging box
+#                     (Docker + AWS CLI + curl preinstalled; the script gates them)
+#   If you prefer the ephemeral "CI box" variant, change `runs-on` of the
+#   deploy job to ubuntu-latest — the stack then lives on the runner VM only.
+#
+# IDs: OIDC role assumption (NO long-lived keys committed), same baseline as
+# the production deploy-backend.yml workflow.
+#
+# Required GitHub secrets:
+#   AWS_STAGING_DEPLOY_ROLE_ARN  (OIDC federated role: ecr auth + push/pull)
+#   STAGING_POSTGRES_PASSWORD
+#   STAGING_JWT_SECRET
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - 'pkg/**'
+      - 'cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'migrations/**'
+      - 'Dockerfile'
+      - 'docker-compose*.yml'
+      - 'database/seeders/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy-staging.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-1
+  IMAGE_TAG: latest-staging
+
+permissions:
+  contents: read
+  id-token: write
+
+# Never run two staging deploys at once (both would fight over `down -v`).
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Go vet / build / unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Go vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Unit tests (settlement + wallet engines)
+        run: go test ./pkg/...
+
+  push:
+    name: Build & Push staging images to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # One build -> three tags (api/worker/webhook), pushed to ECR.
+      - name: Single-build multi-tag push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: ./deploy/ecr-push.sh
+
+  deploy:
+    name: Deploy stack to staging EC2
+    needs: push
+    runs-on: [self-hosted, linux, x64, staging]
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run staging deployment pipeline
+        env:
+          ECR_REGISTRY: ${{ needs.push.outputs.registry }}
+          STAGE_ENV: staging
+          POSTGRES_PASSWORD: ${{ secrets.STAGING_POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+        run: |
+          chmod +x deploy/deploy-staging.sh
+          ./deploy/deploy-staging.sh
+
+      - name: Post-deploy marker
+        if: always()
+        run: 'echo "Staging deploy finished (result: ${{ job.status }}). Verify /api/v1/health + seeded logins on the host."'
