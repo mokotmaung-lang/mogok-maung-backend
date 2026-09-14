@@ -4,7 +4,7 @@
 # Topology:
 #
 #   Internet ─▶ nginx (443 + WSS /ws) ─▶ 127.0.0.1:8081 ─▶ this stack
-#   mmrodds.com ─▶ nginx ─▶ Flutter Web SPA + /admin (admin-web :3000, optional)
+#   oddsmyanmar.online ─▶ nginx ─▶ Flutter Web SPA + /admin (admin-web :3000, optional)
 #
 # Security posture:
 #   * None of the data services (postgres / redis / rabbitmq) publish ANY host

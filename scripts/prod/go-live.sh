@@ -10,7 +10,7 @@
 # Steps (all idempotent):
 #   1. bootstrap docker + compose + ufw (ports 22/80/443)     [VPS only]
 #   2. autofill real secrets in .env.production (never clobber real values)
-#   3. public DNS pre-check against 8.8.8.8 (mmrodds.com + api.mmrodds.com)
+#   3. public DNS pre-check against 8.8.8.8 (DOMAINS from env/default)
 #   4. postgres TLS certs  (scripts/prod/setup-db-tls.sh)
 #   5. Let's Encrypt SSL   (output-level EMAIL?, DOMAINS env override)
 #   6. full deploy         (scripts/prod/deploy.sh - compose up, migrate,
@@ -23,8 +23,8 @@ set -euo pipefail
 
 REPO_DIR=/opt/mogok-maung
 ENV_FILE="${REPO_DIR}/.env.production"
-EMAIL=${EMAIL:-admin@mmrodds.com}
-DOMAINS=${DOMAINS:-"mmrodds.com api.mmrodds.com"}
+EMAIL=${EMAIL:-admin@oddsmyanmar.online}
+DOMAINS=${DOMAINS:-"oddsmyanmar.online api.oddsmyanmar.online"}
 VPS_IP=${VPS_IP:-203.31.93.52}
 APEX="${DOMAINS%% *}"
 API="${DOMAINS##* }"

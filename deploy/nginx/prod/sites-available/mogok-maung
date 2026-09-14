@@ -2,21 +2,21 @@
 # /etc/nginx/sites-available/mogok-maung (symlinked into sites-enabled).
 #
 # Domains (DNS -> VPS IP):
-#   mmrodds.com     -> Flutter Web SPA (mobile/build/web) + /admin proxy
-#   api.mmrodds.com -> Go REST API on 127.0.0.1:8081 + WSS /ws
+#   oddsmyanmar.online     -> Flutter Web SPA (mobile/build/web) + /admin proxy
+#   api.oddsmyanmar.online -> Go REST API on 127.0.0.1:8081 + WSS /ws
 #
 # The http-level guardrails (rate-limit zones, $admin_gate, $connection_upgrade,
 # upstreams, cloudflare real_ip rewrites) live in /etc/nginx/nginx.conf — do NOT
 # duplicate zones/maps here.
 #
 # ONE combined Let's Encrypt cert covers BOTH names (requested by setup-ssl.sh as
-# `-d mmrodds.com -d api.mmrodds.com`) under /etc/letsencrypt/live/mmrodds.com/.
+# `-d oddsmyanmar.online -d api.oddsmyanmar.online`) under /etc/letsencrypt/live/oddsmyanmar.online/.
 # ==============================================================================
 
 # --- HTTP -> HTTPS + ACME challenge -------------------------------------------
 server {
     listen 80;
-    server_name mmrodds.com api.mmrodds.com;
+    server_name oddsmyanmar.online api.oddsmyanmar.online;
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -26,14 +26,14 @@ server {
     }
 }
 
-# --- API (api.mmrodds.com) ------------------------------------------------------
+# --- API (api.oddsmyanmar.online) ------------------------------------------------------
 server {
     listen 443 ssl;
     http2 on;
-    server_name api.mmrodds.com;
+    server_name api.oddsmyanmar.online;
 
-    ssl_certificate     /etc/letsencrypt/live/mmrodds.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/mmrodds.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/oddsmyanmar.online/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/oddsmyanmar.online/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_session_cache shared:SSL:10m;
@@ -113,14 +113,14 @@ server {
     }
 }
 
-# --- Main domain (mmrodds.com) — Flutter Web SPA + dashboard --------------------
+# --- Main domain (oddsmyanmar.online) — Flutter Web SPA + dashboard --------------------
 server {
     listen 443 ssl;
     http2 on;
-    server_name mmrodds.com;
+    server_name oddsmyanmar.online;
 
-    ssl_certificate     /etc/letsencrypt/live/mmrodds.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/mmrodds.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/oddsmyanmar.online/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/oddsmyanmar.online/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_session_cache shared:SSL:10m;

@@ -179,7 +179,7 @@ if command -v nginx >/dev/null 2>&1; then
         echo "      WARNING: 'nginx -t' FAILED — fix before going live; deploy.sh continues"
     fi
 else
-    echo "      nginx not installed yet — run: EMAIL=you@mmrodds.com bash scripts/prod/setup-ssl.sh"
+    echo "      nginx not installed yet — run: EMAIL=you@oddsmyanmar.online bash scripts/prod/setup-ssl.sh"
 fi
 
 echo "      install /opt/mogok-maung/.env.production"

@@ -14,7 +14,7 @@
 # ==============================================================================
 set -euo pipefail
 
-DOMAIN=${DOMAIN:-api.mmrodds.com}
+DOMAIN=${DOMAIN:-api.oddsmyanmar.online}
 API_BASE_URL=${API_BASE_URL:-"https://${DOMAIN}"}
 WS_BASE_URL=${WS_BASE_URL:-"wss://${DOMAIN}"}
 MOBILE_DIR="${MOBILE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../mobile" && pwd)}"

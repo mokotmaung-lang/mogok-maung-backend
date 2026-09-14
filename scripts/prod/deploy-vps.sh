@@ -18,9 +18,9 @@ GIT_URL="${GIT_URL:-https://github.com/mokotmaung-lang/mogok-maung-backend.git}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 # Public domain pair. " <apex> <api-host>" → apex SPA + api host (api.* name is
 # conventional; change BOTH here AND the A-records of that host).
-DOMAINS="${DOMAINS:-mmrodds.com api.mmrodds.com}"
+DOMAINS="${DOMAINS:-oddsmyanmar.online api.oddsmyanmar.online}"
 # Certbot contact / :health check host (first part of DOMAINS is the SPA apex).
-EMAIL="${EMAIL:-admin@mmrodds.com}"
+EMAIL="${EMAIL:-admin@oddsmyanmar.online}"
 # Expected public A-record values (used for the DNS pre-check warning only).
 VPS_IP="${VPS_IP:-203.31.93.52}"
 SKIP_PORT_CHECK="${SKIP_PORT_CHECK:-0}"
