@@ -4,8 +4,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/di/service_locator.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../betting/presentation/screens/mix_parlay_screen.dart';
+import '../../../betting/presentation/screens/single_bet_screen.dart';
+import '../../../history/presentation/screens/bet_history_screen.dart';
+import '../../../live_match/presentation/screens/live_match_screen.dart';
 import '../../../wallet/presentation/bloc/wallet_bloc.dart';
 import '../../../wallet/data/wallet_repository.dart';
+import '../../../wallet/presentation/screens/transaction_history_screen.dart';
+import '../../../wallet/presentation/screens/unit_request_screen.dart';
+import 'profile_screen.dart';
 import '../widgets/grid_menu_card.dart';
 import '../widgets/promo_banner_widget.dart';
 import '../widgets/user_profile_info_bar.dart';
@@ -19,14 +26,14 @@ class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
   static const List<_MenuEntry> _menu = [
-    _MenuEntry('ဘော်ဒီ', Icons.sports_soccer, Colors.blueAccent),
-    _MenuEntry('မောင်း', Icons.format_list_bulleted, Colors.orangeAccent),
-    _MenuEntry('လောင်းထားသောပွဲများ', Icons.history, Colors.greenAccent),
-    _MenuEntry('ငွေစာရင်းများ', Icons.account_balance_wallet, Colors.purpleAccent),
-    _MenuEntry('ငွေသွင်းရန်', Icons.add_circle_outline, Colors.tealAccent),
-    _MenuEntry('ငွေထုတ်ရန်', Icons.remove_circle_outline, Colors.pinkAccent),
-    _MenuEntry('ကိုယ်ရေးအချက်အလက်', Icons.person_outline, Colors.amberAccent),
-    _MenuEntry('Live', Icons.live_tv, Colors.redAccent),
+    _MenuEntry('ဘော်ဒီ', Icons.sports_soccer, Colors.blueAccent, _MenuAction.bodyMatches),
+    _MenuEntry('မောင်း', Icons.format_list_bulleted, Colors.orangeAccent, _MenuAction.maungMatches),
+    _MenuEntry('လောင်းထားသောပွဲများ', Icons.history, Colors.greenAccent, _MenuAction.betHistory),
+    _MenuEntry('ငွေစာရင်းများ', Icons.account_balance_wallet, Colors.purpleAccent, _MenuAction.transactions),
+    _MenuEntry('ငွေသွင်းရန်', Icons.add_circle_outline, Colors.tealAccent, _MenuAction.deposit),
+    _MenuEntry('ငွေထုတ်ရန်', Icons.remove_circle_outline, Colors.pinkAccent, _MenuAction.withdraw),
+    _MenuEntry('ကိုယ်ရေးအချက်အလက်', Icons.person_outline, Colors.amberAccent, _MenuAction.profile),
+    _MenuEntry('Live', Icons.live_tv, Colors.redAccent, _MenuAction.live),
   ];
 
   @override
@@ -72,7 +79,7 @@ class DashboardScreen extends ConsumerWidget {
                       title: entry.title,
                       icon: entry.icon,
                       color: entry.color,
-                      onTap: () => _onMenuTap(context, entry.title),
+                      onTap: () => _onMenuTap(context, entry.action),
                     ),
                 ],
               ),
@@ -83,11 +90,30 @@ class DashboardScreen extends ConsumerWidget {
     );
   }
 
-  void _onMenuTap(BuildContext context, String title) {
-    // Navigation binding point: each cell routes to its feature module
-    // (BodySheet, MaungSheet, BetHistoryScreen, LedgerScreen, etc.).
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$title ရွေးချယ်ပြီးပါပြီ')),
+  void _onMenuTap(BuildContext context, _MenuAction action) {
+    switch (action) {
+      case _MenuAction.bodyMatches:
+        _push(context, const SingleBetScreen());
+      case _MenuAction.maungMatches:
+        _push(context, const MixParlayScreen());
+      case _MenuAction.betHistory:
+        _push(context, const BetHistoryScreen());
+      case _MenuAction.live:
+        _push(context, const LiveMatchScreen());
+      case _MenuAction.transactions:
+        _push(context, const TransactionHistoryScreen());
+      case _MenuAction.deposit:
+        _push(context, const DepositRequestScreen());
+      case _MenuAction.withdraw:
+        _push(context, const WithdrawRequestScreen());
+      case _MenuAction.profile:
+        _push(context, const ProfileScreen());
+    }
+  }
+
+  void _push(BuildContext context, Widget screen) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => screen),
     );
   }
 }
@@ -128,10 +154,23 @@ String formatUnits(double value) {
   return out.toString();
 }
 
+/// Navigation destinations available from the dashboard grid.
+enum _MenuAction {
+  bodyMatches,
+  maungMatches,
+  betHistory,
+  transactions,
+  deposit,
+  withdraw,
+  profile,
+  live,
+}
+
 class _MenuEntry {
   final String title;
   final IconData icon;
   final Color color;
+  final _MenuAction action;
 
-  const _MenuEntry(this.title, this.icon, this.color);
+  const _MenuEntry(this.title, this.icon, this.color, this.action);
 }

@@ -7,6 +7,7 @@ import '../../features/betting/data/repositories/odds_repository_impl.dart';
 import '../../features/betting/domain/repositories/odds_repository.dart';
 import '../../features/history/data/bet_history_repository.dart';
 import '../../features/wallet/data/wallet_repository.dart';
+import '../../features/wallet/data/unit_request_repository.dart';
 import '../../features/security_settings/data/security_settings_repository.dart';
 
 /// Global service locator (get_it).
@@ -38,6 +39,11 @@ void setupServiceLocator() {
   );
   sl.registerLazySingleton<SecuritySettingsRepository>(
     () => SecuritySettingsRepository(
+      client: ApiClient(baseUrl: AppConfig.apiBaseUrl, token: _sessionToken),
+    ),
+  );
+  sl.registerLazySingleton<UnitRequestRepository>(
+    () => UnitRequestRepository(
       client: ApiClient(baseUrl: AppConfig.apiBaseUrl, token: _sessionToken),
     ),
   );

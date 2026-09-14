@@ -1,0 +1,272 @@
+# ==============================================================================
+# docker-compose.prod.yml — Production single-host stack (VPS) for Mogok Maung.
+#
+# Topology:
+#
+#   Internet ─▶ nginx (443 + WSS /ws) ─▶ 127.0.0.1:8081 ─▶ this stack
+#   mmrodds.com ─▶ nginx ─▶ Flutter Web SPA + /admin (admin-web :3000, optional)
+#
+# Security posture:
+#   * None of the data services (postgres / redis / rabbitmq) publish ANY host
+#     port — they live only on the internal `bet_internal_network` bridge, so
+#     the database is unreachable from outside the host.
+#   * Only the API (and the bot webhook :8090) are bound to 127.0.0.1; nginx on
+#     the same host is the sole external entry point.
+#   * PostgreSQL runs TLS (`ssl=on`), which is why DB_SSLMODE=require is safe.
+#     Generate the self-signed cert ONCE with scripts/prod/setup-db-tls.sh, or
+#     drop a real CA cert at ./secrets/pg-tls/server.{crt,key}.
+#   * Schema is applied automatically at API boot (AUTO_MIGRATE=true,
+#     advisory-locked migrator, exactly-once per version in ./migrations — see
+#     pkg/database/migrate.go). No initdb DDL mount is used or needed.
+#   * The first SUPER_ADMIN is created AFTER migrations by
+#     scripts/prod/bootstrap-admin.sh (see ordering note there).
+#   * Memory limits are enforced for both compose v2 non-swarm (`mem_limit`)
+#     and swarm (`deploy.resources`).
+#
+# Bootstrap (scripts/prod/deploy.sh automates all of this):
+#   1) cp .env.production && fill secrets on the SERVER
+#      (JWT_SECRET = `openssl rand -hex 32`)
+#   2) scripts/prod/setup-db-tls.sh                  # once, creates ./secrets/pg-tls
+#   3) export BOOT_ADMIN_USER=superadmin BOOT_ADMIN_PASS='<pw>'
+#   4) docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#   5) scripts/prod/bootstrap-admin.sh               # after /health is OK
+# ==============================================================================
+
+services:
+  # 1. Primary PostgreSQL — TLS enabled, internal network only.
+  postgres-db:
+    image: postgres:16-alpine
+    container_name: mm_prod_postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:?set DB_USER in .env.production}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env.production}
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in .env.production}
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/tls/server.crt
+      - -c
+      - ssl_key_file=/tls/server.key
+      - -c
+      - shared_buffers=256MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Seeder used post-migration by scripts/prod/bootstrap-admin.sh.
+      - ./database/seeders:/seeders:ro
+      # Postgres TLS certs — create once via scripts/prod/setup-db-tls.sh.
+      - ./secrets/pg-tls:/tls:ro
+    # Intentionally NO `ports:` — internal network ONLY.
+    mem_limit: 2g
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 2. Redis for live-odds cache + WS pub/sub fan-out (auth required).
+  redis-cache:
+    image: redis:7-alpine
+    container_name: mm_prod_redis
+    command:
+      - /bin/sh
+      - -c
+      - >
+        redis-server --appendonly yes
+        --maxmemory 512mb --maxmemory-policy allkeys-lru
+        --requirepass "${REDIS_PASSWORD}"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.production}
+    volumes:
+      - redisdata:/data
+    mem_limit: 1g
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 3. RabbitMQ for match-result settlement events (durable queue).
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    container_name: mm_prod_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env.production}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:?set RABBITMQ_PASS in .env.production}
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    mem_limit: 1g
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 256m
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 4. Go User API (+ admin/agent control plane). Serves on 127.0.0.1:8081
+  #    so the host nginx (deploy/nginx/prod/nginx.conf) can reach it without
+  #    ever exposing the port publicly.
+  user-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mm_prod_user_api
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      DB_HOST: postgres-db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      # TLS against the bundled postgres (sslmode=require, no verification).
+      DB_SSLMODE: require
+      PORT: "8080"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env.production}
+      REDIS_ADDR: redis-cache:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      AUTO_MIGRATE: "true"
+      MIGRATIONS_DIR: /app/migrations
+      AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      SETTLEMENT_QUEUE: ${SETTLEMENT_QUEUE:-match_settlement_queue}
+      AGENT_UNIT_REQUEST_QUEUE: ${AGENT_UNIT_REQUEST_QUEUE:-agent_unit_request_queue}
+      STAGE_ENV: production
+      DOMAIN_NAME: ${DOMAIN_NAME:-}
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    mem_limit: 512m
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 5. Settlement worker: consumes match_settlement_queue and settles PENDING
+  #    Maung/Body bets ACID-ly. Stays behind the API so the schema exists.
+  settlement-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mm_prod_settlement_worker
+    command: ["mogok-maung-worker"]
+    environment:
+      DB_HOST: postgres-db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_SSLMODE: require
+      AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      SETTLEMENT_QUEUE: ${SETTLEMENT_QUEUE:-match_settlement_queue}
+      SETTLEMENT_PREFETCH: "10"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    # Baked-in Dockerfile HEALTHCHECK probes :8080, but the worker is not an
+    # HTTP server — disable it or compose would always report it unhealthy.
+    mem_limit: 512m
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 6. Bot webhook worker: Viber/Telegram deposit/withdraw message intake on
+  #    :8090 (loopback-only; nginx can expose it if the channels are enabled).
+  bot-webhook-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mm_prod_bot_webhook
+    command: ["mogok-maung-webhook"]
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      DB_HOST: postgres-db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_SSLMODE: require
+      HTTP_ADDR: ":8090"
+      AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      AGENT_UNIT_REQUEST_QUEUE: ${AGENT_UNIT_REQUEST_QUEUE:-agent_unit_request_queue}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      VIBER_AUTH_TOKEN: ${VIBER_AUTH_TOKEN:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+    mem_limit: 256m
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+        reservations:
+          memory: 128m
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+volumes:
+  pgdata:
+  redisdata:
+  rabbitmqdata:
+
+networks:
+  bet_internal_network:
+    driver: bridge

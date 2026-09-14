@@ -15,6 +15,7 @@ import (
 	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 	"mogok-maung-backend/pkg/auth"
+	"mogok-maung-backend/pkg/wallet"
 )
 
 // DefaultDownlinePassword is the bootstrap credential assigned when an agent
@@ -151,6 +152,180 @@ func (h *AgentHandler) CreateUnitRequest(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+type transferDownlineUnitsRequest struct {
+	UserID int64   `json:"user_id"`
+	Amount float64 `json:"amount"`
+	Type   string  `json:"type"` // DEPOSIT (agent -> user) | WITHDRAW (user -> agent)
+}
+
+// TransferDownlineUnits moves units directly between the calling agent's own
+// balance and one of its downline users — no admin approval involved. The
+// wallet engine locks both rows in ascending user_id order inside one
+// transaction and writes the double-entry ledger (debit + credit) atomically.
+//
+//	POST /api/v1/agent/units/transfer
+//	{ "user_id": 42, "amount": 50000, "type": "DEPOSIT" | "WITHDRAW" }
+func (h *AgentHandler) TransferDownlineUnits(w http.ResponseWriter, r *http.Request) {
+	var req transferDownlineUnitsRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.UserID <= 0 {
+		writeError(w, http.StatusBadRequest, "user_id must be a positive integer")
+		return
+	}
+	if req.Amount <= 0 {
+		writeError(w, http.StatusBadRequest, "amount must be greater than zero")
+		return
+	}
+	trxType := strings.ToUpper(strings.TrimSpace(req.Type))
+	if trxType != "DEPOSIT" && trxType != "WITHDRAW" {
+		writeError(w, http.StatusBadRequest, "type must be DEPOSIT or WITHDRAW")
+		return
+	}
+
+	agentID, _ := auth.PrincipalFrom(r.Context())
+	if agentID.UserID == req.UserID {
+		writeError(w, http.StatusBadRequest, "cannot transfer units to yourself")
+		return
+	}
+
+	engine := wallet.Engine{DB: h.db}
+	res, err := engine.TransferUnits(r.Context(), wallet.TransferRequest{
+		AgentID:     agentID.UserID,
+		UserID:      req.UserID,
+		Amount:      req.Amount,
+		Direction:   wallet.Direction(trxType),
+		Description: "Agent dashboard direct transfer",
+	})
+	if err != nil {
+		var terr wallet.TransferError
+		switch {
+		case errors.As(err, &terr):
+			switch {
+			case errors.Is(terr, wallet.ErrInsufficientBalance):
+				if trxType == "DEPOSIT" {
+					writeError(w, http.StatusUnprocessableEntity,
+						"လက်ကျန် Unit မလုံလောက်ပါ။ Admin ထံ Unit တောင်းဆိုပါ (Insufficient Agent Balance)")
+				} else {
+					writeError(w, http.StatusUnprocessableEntity,
+						"ယူဆာ လက်ကျန် Unit မလုံလောက်ပါ (Insufficient User Balance)")
+				}
+			case errors.Is(terr, wallet.ErrHierarchyViolation):
+				writeError(w, http.StatusForbidden, "user is not your downline")
+			case errors.Is(terr, wallet.ErrInvalidAmount):
+				writeError(w, http.StatusBadRequest, terr.Error())
+			case errors.Is(terr, wallet.ErrInvalidDirection):
+				writeError(w, http.StatusBadRequest, terr.Error())
+			default:
+				log.Printf("agent: transfer units %d: %v", req.UserID, err)
+				writeError(w, http.StatusInternalServerError, "internal server error")
+			}
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, "downline user not found")
+		default:
+			log.Printf("agent: transfer units %d: %v", req.UserID, err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+		}
+		return
+	}
+
+	var message string
+	if trxType == "DEPOSIT" {
+		message = fmt.Sprintf("ယူဆာ ထံ ယူနစ် %.2f ထည့်သွင်းပြီးပါပြီ (Agent → Downline)", req.Amount)
+	} else {
+		message = fmt.Sprintf("ယူဆာ ထံမှ ယူနစ် %.2f ပြန်ရယူပြီးပါပြီ (Downline → Agent)", req.Amount)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": message,
+		"data": map[string]interface{}{
+			"user_id":       req.UserID,
+			"amount":        req.Amount,
+			"type":          trxType,
+			"agent_balance": res.AgentBalance,
+			"user_balance":  res.UserBalance,
+		},
+	})
+}
+
+type agentUnitRequest struct {
+	Amount float64 `json:"amount"`
+	Type   string  `json:"type"` // DEPOSIT (top-up) | WITHDRAW (cash-out)
+	Note   string  `json:"note"` // optional free-text context for the Super Admin
+}
+
+// CreateAgentUnitRequest requests a top-up (DEPOSIT) or cash-out (WITHDRAW) of
+// the calling AGENT's own balance from the SUPER_ADMIN approval queue. The
+// requester of record is the agent itself (not a downline), so on approval the
+// approved units land in exactly that agent's Unit Balance:
+//
+//	POST /api/v1/agent/unit-requests
+//	{ "amount": 100000, "type": "DEPOSIT", "note": "weekly top-up" }
+func (h *AgentHandler) CreateAgentUnitRequest(w http.ResponseWriter, r *http.Request) {
+	var req agentUnitRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Amount <= 0 {
+		writeError(w, http.StatusBadRequest, "amount must be greater than zero")
+		return
+	}
+	trxType := strings.ToUpper(strings.TrimSpace(req.Type))
+	if trxType != "DEPOSIT" && trxType != "WITHDRAW" {
+		writeError(w, http.StatusBadRequest, "type must be DEPOSIT or WITHDRAW")
+		return
+	}
+	req.Note = strings.TrimSpace(req.Note)
+	if len(req.Note) > 500 {
+		writeError(w, http.StatusBadRequest, "note must be 500 characters or fewer")
+		return
+	}
+
+	agentID, _ := auth.PrincipalFrom(r.Context())
+
+	// Stash the optional note inside the JSONB payment_info column so the
+	// Super Admin can see the agent's context without a schema change.
+	var paymentInfo []byte
+	if req.Note != "" {
+		noteJSON, err := json.Marshal(map[string]string{"note": req.Note})
+		if err != nil {
+			log.Printf("agent: marshal note %d: %v", agentID.UserID, err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		paymentInfo = noteJSON
+	}
+
+	var requestID int64
+	err := h.db.QueryRowContext(r.Context(), `
+		INSERT INTO unit_requests (requester_id, approver_id, amount, type, status, payment_info)
+		VALUES ($1, NULL, $2, $3, 'PENDING', $4)
+		RETURNING id`,
+		agentID.UserID, req.Amount, trxType, paymentInfo,
+	).Scan(&requestID)
+	if err != nil {
+		log.Printf("agent: create unit request %d: %v", agentID.UserID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"success": true,
+		"message": "Super Admin ထံ ယူနစ်တောင်းခံမှုကို ပေးပို့ပြီးပါပြီ။ အတည်ပြုပြီးပါက Agent Unit Balance သို့ အလိုအလျောက် ထည့်သွင်းပေးပါမည်။",
+		"data": map[string]interface{}{
+			"request_id": requestID,
+			"status":     "PENDING",
+			"type":       trxType,
+			"amount":     req.Amount,
+			"note":       req.Note,
+		},
+	})
+}
+
 // ListDownlines returns the calling agent's direct users with balances.
 func (h *AgentHandler) ListDownlines(w http.ResponseWriter, r *http.Request) {
 	agentID, _ := auth.PrincipalFrom(r.Context())
@@ -276,7 +451,7 @@ func (h *AgentHandler) GetAgentContactProfile(w http.ResponseWriter, r *http.Req
 			"success": true,
 			"message": "ဆက်သွယ်ရန် အချက်အလက် မသတ်မှတ်ရသေးပါ။",
 			"data": map[string]interface{}{
-"agent_id":          agentID.UserID,
+				"agent_id":          agentID.UserID,
 				"viber_number":      "",
 				"telegram_username": "",
 				"phone_number":      "",

@@ -3,6 +3,8 @@ package bet
 import (
 	"fmt"
 	"strings"
+
+	"github.com/shopspring/decimal"
 )
 
 // OddsType represents the Myanmar traditional odds format for BODY bets.
@@ -87,7 +89,9 @@ func MaxPotentialWin(betType string, totalStake float64, legs []PotentialWinLeg)
 		return 0, fmt.Errorf("at least one selection required to compute potential payout")
 	}
 
-	product := 1.0
+	// Guardrail: the accumulator and final stake product run in fixed-point
+	// decimal so a payout preview never picks up float64 bias.
+	acc := decimal.NewFromInt(1)
 	switch strings.ToUpper(strings.TrimSpace(betType)) {
 	case "MAUNG":
 		for _, leg := range legs {
@@ -107,7 +111,7 @@ func MaxPotentialWin(betType string, totalStake float64, legs []PotentialWinLeg)
 			if m <= 0 {
 				m = 1.0
 			}
-			product *= m
+			acc = acc.Mul(decimal.NewFromFloat(m))
 		}
 
 	case "BODY":
@@ -136,14 +140,14 @@ func MaxPotentialWin(betType string, totalStake float64, legs []PotentialWinLeg)
 			if effective < 1.0 {
 				effective = 1.0
 			}
-			product *= effective
+			acc = acc.Mul(decimal.NewFromFloat(effective))
 		}
 
 	default:
 		return 0, fmt.Errorf("unsupported bet type: %q", betType)
 	}
 
-	return totalStake * product, nil
+	return decimal.NewFromFloat(totalStake).Mul(acc).Round(2).InexactFloat64(), nil
 }
 
 // MaxPotentialLoss computes the worst-case loss a user can incur for a bet.
@@ -157,7 +161,7 @@ func MaxPotentialLoss(betType string, totalStake float64, bodyOddsTypes []string
 
 	switch strings.ToUpper(strings.TrimSpace(betType)) {
 	case "MAUNG":
-		return totalStake * maungMaxLossMultiplier, nil
+		return decimal.NewFromFloat(totalStake).Round(2).InexactFloat64(), nil
 	case "BODY":
 		if len(bodyOddsTypes) == 0 {
 			return 0, fmt.Errorf("body bet requires at least one selection")
@@ -172,7 +176,10 @@ func MaxPotentialLoss(betType string, totalStake float64, bodyOddsTypes []string
 				worst = profile.MaxLossMultiplier
 			}
 		}
-		return totalStake * worst, nil
+		return decimal.NewFromFloat(totalStake).
+			Mul(decimal.NewFromFloat(worst)).
+			Round(2).
+			InexactFloat64(), nil
 	default:
 		return 0, fmt.Errorf("unsupported bet type: %q", betType)
 	}

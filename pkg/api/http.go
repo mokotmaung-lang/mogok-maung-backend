@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"math"
 	"net/http"
+
+	"github.com/shopspring/decimal"
 )
 
 // sentinel errors surfaced by approval settlement.
@@ -46,7 +47,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // round2 rounds a money value to two decimal places, matching the NUMERIC(15,2)
-// storage used across wallets and the ledger.
+// storage used across wallets and the ledger. Fixed-point decimal (guardrail):
+// never float64 rounding for currency math.
 func round2(v float64) float64 {
-	return math.Round(v*100) / 100
+	return decimal.NewFromFloat(v).Round(2).InexactFloat64()
 }

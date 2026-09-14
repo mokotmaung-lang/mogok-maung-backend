@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/shopspring/decimal"
 )
 
 // Engine provides atomic wallet operations with pessimistic row-level locking
@@ -23,12 +25,35 @@ type Engine struct {
 	DB *sql.DB
 }
 
-// TransferRequest describes an agent→user or admin→user units transfer.
+// Direction indicates which way units move between an agent and one of its
+// downline users.
+type Direction string
+
+const (
+	// DirectionDeposit moves units from the agent's balance to the user's
+	// balance (agent -> user). Agent ledger leg is WITHDRAW, user leg DEPOSIT.
+	DirectionDeposit Direction = "DEPOSIT"
+
+	// DirectionWithdraw moves units from the user's balance back to the
+	// agent's balance (user -> agent). User ledger leg is WITHDRAW, agent leg
+	// DEPOSIT.
+	DirectionWithdraw Direction = "WITHDRAW"
+)
+
+// TransferRequest describes an agent⇄downline units movement.
 type TransferRequest struct {
 	AgentID     int64
 	UserID      int64
 	Amount      float64
-	Description string
+	Direction   Direction
+	Description string // optional human-readable context
+}
+
+// TransferResult reports the post-transfer balances so the HTTP layer can
+// echo the updated figures without a second read.
+type TransferResult struct {
+	AgentBalance float64
+	UserBalance  float64
 }
 
 // TransferError is the domain error surfaced to the HTTP handler.
@@ -38,30 +63,35 @@ type TransferError struct {
 
 // Sentinel errors distinguish wallet failures at the HTTP mapping layer.
 var (
-	ErrInsufficientBalance = TransferError{Reason: "insufficient agent balance"}
+	ErrInsufficientBalance = TransferError{Reason: "insufficient balance for transfer"}
 	ErrHierarchyViolation  = TransferError{Reason: "user does not belong to agent"}
 	ErrInvalidAmount       = TransferError{Reason: "amount must be greater than zero"}
+	ErrInvalidDirection    = TransferError{Reason: "direction must be DEPOSIT or WITHDRAW"}
 )
 
 func (e TransferError) Error() string { return e.Reason }
 
-// TransferUnits moves [Amount] from Agent's current_balance to User's
-// current_balance atomically. Both ledger rows (debit on agent, credit on
-// user) are written inside the same ACID transaction under pessimistic
-// FOR UPDATE row locks. This is safe to call concurrently.
+// TransferUnits moves [Request.Amount] between an Agent's current_balance and
+// one of its downline User's current_balance, atomically. Both ledger rows
+// (a debit on one side and an equal credit on the other) are written inside
+// the same ACID transaction under pessimistic FOR UPDATE row locks. This is
+// safe to call concurrently.
 //
 // DEADLOCK GUARDRAIL: both affected rows are locked in ascending user_id
 // order. Every multi-user wallet operation must acquire locks in the same
 // canonical order; any other ordering lets two concurrent transfers on the
 // same agent/user pair lock in opposite sequence and deadlock under load.
-func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) error {
+func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*TransferResult, error) {
 	if req.Amount <= 0 {
-		return ErrInvalidAmount
+		return nil, ErrInvalidAmount
+	}
+	if req.Direction != DirectionDeposit && req.Direction != DirectionWithdraw {
+		return nil, ErrInvalidDirection
 	}
 
 	tx, err := w.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -88,7 +118,7 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) error {
 			  WHERE id = $1
 			    FOR UPDATE`, id).Scan(&row.id, &row.role, &row.balance, &row.parentID)
 		if err != nil {
-			return fmt.Errorf("wallet row lock failed (id %d): %w", id, err)
+			return nil, fmt.Errorf("wallet row lock failed (id %d): %w", id, err)
 		}
 		rows[id] = row
 	}
@@ -98,63 +128,119 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) error {
 
 	// 2. Role & hierarchy checks under both locks.
 	if agent.role != "AGENT" && agent.role != "SUPER_ADMIN" {
-		return fmt.Errorf("agent balance lock failed: invalid role %q", agent.role)
+		return nil, fmt.Errorf("agent balance lock failed: invalid role %q", agent.role)
 	}
 	if user.role != "USER" {
-		return fmt.Errorf("user balance lock failed: invalid role %q", user.role)
+		return nil, fmt.Errorf("user balance lock failed: invalid role %q", user.role)
 	}
 	if !user.parentID.Valid || user.parentID.Int64 != req.AgentID {
-		return ErrHierarchyViolation
-	}
-	if agent.balance < req.Amount {
-		return ErrInsufficientBalance
+		return nil, ErrHierarchyViolation
 	}
 
-	agentBalance := agent.balance
-	userBalance := user.balance
+	// Fixed-point decimal arithmetic (guardrail): never raw float64 for
+	// currency math. Round to 2dp at the monetary boundary; float64 only at
+	// the DB scan/write boundary below.
+	amount := decimal.NewFromFloat(req.Amount).Round(2)
+	agentBal := decimal.NewFromFloat(agent.balance).Round(2)
+	userBal := decimal.NewFromFloat(user.balance).Round(2)
+
+	var (
+		newAgentBal decimal.Decimal
+		newUserBal  decimal.Decimal
+	)
+	switch req.Direction {
+	case DirectionDeposit:
+		// 2b. Sufficiency: the agent must own the units being distributed.
+		if agentBal.LessThan(amount) {
+			return nil, ErrInsufficientBalance
+		}
+		newAgentBal = agentBal.Sub(amount)
+		newUserBal = userBal.Add(amount)
+	case DirectionWithdraw:
+		// 2b. Sufficiency: the user must have the units being pulled back.
+		if userBal.LessThan(amount) {
+			return nil, ErrInsufficientBalance
+		}
+		newAgentBal = agentBal.Add(amount)
+		newUserBal = userBal.Sub(amount)
+	}
+
+	agentBalAfter := newAgentBal.InexactFloat64()
+	userBalAfter := newUserBal.InexactFloat64()
 
 	// 3. Update Balances.
-	newAgentBal := agentBalance - req.Amount
-	newUserBal := userBalance + req.Amount
-
 	_, err = tx.ExecContext(ctx,
 		`UPDATE users SET current_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-		newAgentBal, req.AgentID)
+		agentBalAfter, req.AgentID)
 	if err != nil {
-		return fmt.Errorf("failed to deduct agent balance: %w", err)
+		return nil, fmt.Errorf("failed to update agent balance: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx,
 		`UPDATE users SET current_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-		newUserBal, req.UserID)
+		userBalAfter, req.UserID)
 	if err != nil {
-		return fmt.Errorf("failed to credit user balance: %w", err)
+		return nil, fmt.Errorf("failed to update user balance: %w", err)
 	}
 
-	// 4. Record Double-Entry Ledger.
+	// 4. Record Double-Entry Ledger. Every movement writes exactly two rows:
+	//    a debit on the side that loses units and a credit on the side that
+	//    gains them (amount_change sums to zero).
 	ledgerQuery := `
 		INSERT INTO unit_ledger
-		    (user_id, ref_user_id, bet_id, type, amount_change,
+		    (user_id, ref_user_id, request_id, bet_id, type, amount_change,
 		     balance_before, balance_after, description)
-		 VALUES ($1, $2, NULL, $3, $4, $5, $6, $7)`
+		 VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7)`
 
-	// Agent Ledger (Negative Change — debit).
-	_, err = tx.ExecContext(ctx, ledgerQuery,
-		req.AgentID, req.UserID, "WITHDRAW", -req.Amount,
-		agentBalance, newAgentBal,
-		fmt.Sprintf("Transfer to User %d: %s", req.UserID, req.Description))
-	if err != nil {
-		return fmt.Errorf("agent ledger write failed: %w", err)
+	switch req.Direction {
+	case DirectionDeposit:
+		// Agent Ledger (Negative Change — debit).
+		if _, err := tx.ExecContext(ctx, ledgerQuery,
+			req.AgentID, req.UserID, "WITHDRAW", amount.Neg().InexactFloat64(),
+			agent.balance, agentBalAfter,
+			ledgerDescription("Transfer to User %d", req.UserID, req.Description),
+		); err != nil {
+			return nil, fmt.Errorf("agent ledger write failed: %w", err)
+		}
+		// User Ledger (Positive Change — credit).
+		if _, err := tx.ExecContext(ctx, ledgerQuery,
+			req.UserID, req.AgentID, "DEPOSIT", amount.InexactFloat64(),
+			user.balance, userBalAfter,
+			ledgerDescription("Transfer from Agent %d", req.AgentID, req.Description),
+		); err != nil {
+			return nil, fmt.Errorf("user ledger write failed: %w", err)
+		}
+	case DirectionWithdraw:
+		// User Ledger first (debit from the user's balance).
+		if _, err := tx.ExecContext(ctx, ledgerQuery,
+			req.UserID, req.AgentID, "WITHDRAW", amount.Neg().InexactFloat64(),
+			user.balance, userBalAfter,
+			ledgerDescription("Transfer back to Agent %d", req.AgentID, req.Description),
+		); err != nil {
+			return nil, fmt.Errorf("user ledger write failed: %w", err)
+		}
+		// Agent Ledger (credit back to the agent's balance).
+		if _, err := tx.ExecContext(ctx, ledgerQuery,
+			req.AgentID, req.UserID, "DEPOSIT", amount.InexactFloat64(),
+			agent.balance, agentBalAfter,
+			ledgerDescription("Transfer from User %d", req.UserID, req.Description),
+		); err != nil {
+			return nil, fmt.Errorf("agent ledger write failed: %w", err)
+		}
 	}
 
-	// User Ledger (Positive Change — credit).
-	_, err = tx.ExecContext(ctx, ledgerQuery,
-		req.UserID, req.AgentID, "DEPOSIT", req.Amount,
-		userBalance, newUserBal,
-		fmt.Sprintf("Received from Agent %d: %s", req.AgentID, req.Description))
-	if err != nil {
-		return fmt.Errorf("user ledger write failed: %w", err)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transfer: %w", err)
 	}
 
-	return tx.Commit()
+	return &TransferResult{AgentBalance: agentBalAfter, UserBalance: userBalAfter}, nil
+}
+
+// ledgerDescription builds a stable ledger description, appending the optional
+// operator note so auditors can trace who/what triggered the movement.
+func ledgerDescription(format string, counterparty int64, note string) string {
+	if note == "" {
+		return fmt.Sprintf(format, counterparty)
+	}
+	return fmt.Sprintf("%s: %s", fmt.Sprintf(format, counterparty), note)
 }

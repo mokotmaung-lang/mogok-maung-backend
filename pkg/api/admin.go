@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"mogok-maung-backend/pkg/auth"
 	"mogok-maung-backend/pkg/worker"
 )
@@ -224,7 +226,8 @@ func (h *AdminHandler) AllocateUnits(w http.ResponseWriter, r *http.Request) {
 		}
 		change = -req.Amount
 	}
-	newBalance := round2(current + change)
+	newBalance := round2(decimal.NewFromFloat(current).
+		Add(decimal.NewFromFloat(change)).Round(2).InexactFloat64())
 
 	if _, err := tx.ExecContext(r.Context(),
 		`UPDATE users

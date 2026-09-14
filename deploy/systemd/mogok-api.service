@@ -1,0 +1,45 @@
+# ==============================================================================
+# /etc/systemd/system/mogok-api.service — Mogok Maung REST API.
+#
+# Runs the natively cross-compiled production binary (scripts/prod/build-backend.sh
+# -> /opt/mogok-maung/build/api) so the platform keeps running in the background
+# automatically across reboots and crashes, independent of the Docker stack.
+#
+# Deploy to the server:
+#   sudo install -m 0644 deploy/systemd/mogok-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mogok-api
+#
+# Requires /opt/mogok-maung/.env.production to hold the real secrets
+# (EnvironmentFile). NOTE: if you run the API via docker-compose.prod.yml
+# instead (both publish 127.0.0.1:8081), pick ONE path — not both.
+# ==============================================================================
+
+[Unit]
+Description=Mogok Maung API (REST + admin/agent control plane)
+After=network-online.target docker.service postgres-db.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=mogok
+Group=mogok
+WorkingDirectory=/opt/mogok-maung
+# All production secrets/URLs (DB_*, JWT_SECRET, TZ...) live here — the file is
+# root-owned 0600 and must NOT be committed.
+EnvironmentFile=/opt/mogok-maung/.env.production
+Environment=PORT=8081
+ExecStart=/opt/mogok-maung/build/api
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -56,51 +56,96 @@ class LiveOddsDisconnect extends LiveOddsEvent {
   const LiveOddsDisconnect();
 }
 
+/// Forwarded from the client's connection stream (connecting/connected/disconnected).
+class LiveOddsConnectionChanged extends LiveOddsEvent {
+  const LiveOddsConnectionChanged(this.connection);
+
+  final LiveOddsConnection connection;
+}
+
+/// Forwarded from the client's decoded odds stream (one WS frame per match).
+class LiveOddsFrameReceived extends LiveOddsEvent {
+  const LiveOddsFrameReceived(this.snapshot);
+
+  final LiveOddsSnapshot snapshot;
+}
+
+/// WebSocket-driven live-odds bloc.
+///
+/// Instead of calling `emit()` from stream callbacks (which fire AFTER the
+/// initiating event handler has completed and would trip the
+/// `emit was called after an event handler completed` assertion), the two
+/// client streams are merely forwarded here via `add(...)` and every `emit`
+/// happens synchronously inside a dedicated event handler. The lifecycle
+/// events stay fully `await`-free and synchronous on purpose; no async gap
+/// exists between an event dispatch and its emission, so `emit.isDone` is
+/// always false at emit time.
 class LiveOddsBloc extends Bloc<LiveOddsEvent, LiveOddsState> {
   LiveOddsBloc(this._client) : super(const LiveOddsInitial()) {
     on<LiveOddsConnect>(_connect);
     on<LiveOddsDisconnect>(_disconnect);
+    on<LiveOddsConnectionChanged>(_onConnectionChanged);
+    on<LiveOddsFrameReceived>(_onFrameReceived);
   }
 
   final LiveOddsClient _client;
   StreamSubscription<LiveOddsSnapshot>? _oddsSub;
   StreamSubscription<LiveOddsConnection>? _connSub;
 
-  Future<void> _connect(LiveOddsConnect event, Emitter<LiveOddsState> emit) async {
+  void _connect(LiveOddsConnect event, Emitter<LiveOddsState> emit) {
     if (_oddsSub != null) return; // already subscribed
 
-    _connSub = _client.connection.listen((c) {
-      if (c != LiveOddsConnection.connected) return;
-      if (!isClosed) {
-        emit(LiveOddsLoaded(
-        connection: c,
-        matches: state.matches,
-        updatedAt: state.updatedAt ?? DateTime.now().toUtc(),
-      ));
-      }
-    });
+    // Streams are bridged into the bloc's own event queue; emitting never
+    // happens from these callbacks (they outlive the event dispatch).
+    _connSub = _client.connection.listen(
+      (c) {
+        if (!isClosed) add(LiveOddsConnectionChanged(c));
+      },
+      onError: (_) {},
+    );
+    _oddsSub = _client.odds.listen(
+      (snapshot) {
+        if (!isClosed) add(LiveOddsFrameReceived(snapshot));
+      },
+      onError: (_) {},
+    );
 
-    _oddsSub = _client.odds.listen((snapshot) {
-      final Map<int, LiveOddsSnapshot> matches = Map.of(state.matches);
-      matches[snapshot.matchId] = snapshot;
-      if (!isClosed) {
-        emit(LiveOddsLoaded(
-          connection: LiveOddsConnection.connected,
-          matches: matches,
-          updatedAt: DateTime.now().toUtc(),
-        ));
-      }
-    });
-
-    // Drive connection changes after subscription listeners attached by
-    // wiring a manual fire after subscribe; the client also emits on connect.
     _client.connect();
   }
 
-  Future<void> _disconnect(
-      LiveOddsDisconnect event, Emitter<LiveOddsState> emit) async {
-    await _oddsSub?.cancel();
-    await _connSub?.cancel();
+  void _onConnectionChanged(
+    LiveOddsConnectionChanged event,
+    Emitter<LiveOddsState> emit,
+  ) {
+    if (isClosed) return;
+    if (event.connection == LiveOddsConnection.connected &&
+        state.connection == LiveOddsConnection.connected) {
+      return; // already connected — avoid redundant rebuilds
+    }
+    emit(LiveOddsLoaded(
+      connection: event.connection,
+      matches: state.matches,
+      updatedAt: state.updatedAt ?? DateTime.now().toUtc(),
+    ));
+  }
+
+  void _onFrameReceived(
+    LiveOddsFrameReceived event,
+    Emitter<LiveOddsState> emit,
+  ) {
+    if (isClosed) return;
+    final Map<int, LiveOddsSnapshot> matches = Map.of(state.matches);
+    matches[event.snapshot.matchId] = event.snapshot;
+    emit(LiveOddsLoaded(
+      connection: LiveOddsConnection.connected,
+      matches: matches,
+      updatedAt: event.snapshot.updatedAt,
+    ));
+  }
+
+  void _disconnect(LiveOddsDisconnect event, Emitter<LiveOddsState> emit) {
+    _oddsSub?.cancel();
+    _connSub?.cancel();
     _oddsSub = null;
     _connSub = null;
     _client.dispose();

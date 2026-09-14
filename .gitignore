@@ -10,6 +10,8 @@
 *.pem
 *.key
 !*.key.tf
+secrets/
+build/
 
 # --- Terraform state & plan files ----------------------------------------------
 infrastructure/terraform/.terraform/

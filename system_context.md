@@ -130,7 +130,23 @@ Float64 exists only as the JSON/DB boundary type.
   drops requests without CF-Connecting-IP and rebuilds X-Forwarded-For from it.
   `deploy/cloudflare/admin-ip-whitelist.sh`: WAF custom rule blocks
   `/api/v1/admin/*` + `/api/v1/agent/*` unless origin IP in `ADMIN_WHITELIST`.
-  `infrastructure/nginx/nginx.conf`: rate-limit `/api/v1/auth/*`.
+  `infrastructure/nginx/nginx.conf`: rate-limit `/api/v1/auth/*` (auth_zone
+  10r/m burst 20) + `limit_req_status 429`; admin/agent gate = `$admin_gate`
+  map (`"1*"` office-CIDR allowlist OR `"01*"` verified cloudflared/VPC origin
+  carrying `$http_cf_connecting_ip`), never header-only. Ships
+  `cloudflare-ips.conf` (official ranges → `set_real_ip_from`) so the
+  CF-Connecting-IP rewrite is unspoofable, plus `admin-whitelist.conf` and
+  `cloudflared-ips.conf` (operator CIDRs). `nginx -t` validated in-container.
+  **Local testing & build gate**: `scripts/dev/test_and_build.ps1`
+  (flutter discovery → pub get → analyze → test → integration smoke on an
+  attached device → optional debug APK → web typecheck + `next build`).
+  Mobile backend origin + WS gateway are overridable via
+  `--dart-define=API_BASE_URL/WS_BASE_URL` (`AppConfig` reads
+  `String.fromEnvironment`), Android cleartext restricted dev-only to
+  `10.0.2.2`/`127.0.0.1`/`localhost` via `network_security_config.xml`, and
+  `mobile/integration_test/app_smoke_test.dart` boot + health-ping smoke
+  (`integration_test` dev dep added). Also ran: 56 mobile tests, `flutter
+  analyze` clean, `tsc` clean, `npm run build` green in the same script run.
   `deploy/nginx/conf.d/admin-dashboard.conf`: allow-listed operator portal vhost.
   **Staging deployment** (`deploy/deploy-staging.sh`): EC2 host → ECR login →
   pull `:latest-staging` images → `down -v` → `up -d --build` with
@@ -182,8 +198,12 @@ Float64 exists only as the JSON/DB boundary type.
   `healthcheck: disable` since they are not HTTP servers). 14 migrations applied.
   Seed `database/seeders/mock_data.sql` (8 users, 6 matches, 8 ledger rows,
   2 bets, password `Staging123!` for every account).
-  - `scripts/dr/verify-ledger.sql` (3 invariants) → **ZERO rows** after both
-    settlement waves (place→hold→win payout incl. hold clamping).
+  - `scripts/dr/verify-ledger.sql` (3 checks + negative-hold guard) → **ZERO rows**
+    after both settlement waves (place→hold→win payout incl. hold clamping).
+    Check 1 invariant CORRECTED: `current_balance == SUM(amount_change)` only —
+    `hold_balance` is a reservation account mutated outside the ledger, so
+    adding it produced a false delta (= outstanding hold) whenever a bet was
+    pending.
   - E2E: BODY bet `1-50` stake 1000 → hold 1500 (`1.5×`; per-wallet
     `current−=hold/hold+=hold`), `potential_payout=1500`, prize pays `1.5×`
     (stored `home_body_payout`); MAUNG 2-leg parlay stays PENDING until both

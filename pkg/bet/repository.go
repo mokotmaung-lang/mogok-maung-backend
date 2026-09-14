@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
+
+	"github.com/shopspring/decimal"
 )
 
 // Repository encapsulates the data-access logic for bet placement.
@@ -89,12 +90,11 @@ func (r *Repository) PlaceBet(ctx context.Context, userID int64, req PlaceBetReq
 	}
 
 	// 2b) Best-case payout snapshot (schema contract: always populated, never
-	//     NULL, rounded to the column's NUMERIC(15,2)).
+	//     NULL, rounded to the column's NUMERIC(15,2) inside MaxPotentialWin).
 	potentialPayout, err := MaxPotentialWin(string(req.BetType), req.TotalStake, winLegs)
 	if err != nil {
 		return PlaceBetResponse{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
-	potentialPayout = math.Round(potentialPayout*100) / 100
 
 	// 3) Pessimistically lock the user's wallet row.
 	var (
@@ -118,8 +118,12 @@ func (r *Repository) PlaceBet(ctx context.Context, userID int64, req PlaceBetReq
 	}
 
 	// 5) Atomic wallet update: deduct max loss from current, hold it.
-	newCurrent := currentBalance - holdAmount
-	newHold := holdBalance + holdAmount
+	// Compute the deltas in fixed-point decimal (guardrail), float64 only at
+	// the SQL write boundary.
+	newCurrent := decimal.NewFromFloat(currentBalance).
+		Sub(decimal.NewFromFloat(holdAmount)).Round(2).InexactFloat64()
+	newHold := decimal.NewFromFloat(holdBalance).
+		Add(decimal.NewFromFloat(holdAmount)).Round(2).InexactFloat64()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE users
 		   SET current_balance = $1, hold_balance = $2, updated_at = CURRENT_TIMESTAMP

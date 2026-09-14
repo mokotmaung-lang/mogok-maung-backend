@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"mogok-maung-backend/pkg/auth"
 	"mogok-maung-backend/pkg/models"
 )
@@ -179,7 +181,8 @@ func (h *SettlementHandler) WeeklySummary(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	netAmount := round2(retained - payoutWin)
+	netAmount := round2(decimal.NewFromFloat(retained).
+		Sub(decimal.NewFromFloat(payoutWin)).Round(2).InexactFloat64())
 
 	// Has this agent+period been confirmed?
 	status := "NONE"
@@ -314,7 +317,8 @@ func (h *SettlementHandler) MarkWeeklySettled(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	netAmount := round2(retained - payoutWin)
+	netAmount := round2(decimal.NewFromFloat(retained).
+		Sub(decimal.NewFromFloat(payoutWin)).Round(2).InexactFloat64())
 
 	_, err = h.db.ExecContext(r.Context(), `
 		INSERT INTO weekly_settlements

@@ -142,6 +142,12 @@ func (h *Hub) Done() <-chan struct{} {
 	return h.done
 }
 
+// Ping reports Redis connectivity for the /health probe. Returns nil when the
+// gateway is backed by a reachable Redis, or an error when the cache is down.
+func (h *Hub) Ping(ctx context.Context) error {
+	return h.rdb.Ping(ctx).Err()
+}
+
 // enqueue forwards a frame to a client without blocking the broadcast loop.
 // Live frames are dropped when a client's buffer is full (next tick replaces
 // them); agent frames are also dropped rather than stalling the fan-out

@@ -107,25 +107,34 @@ class _PromoCard extends StatelessWidget {
         ),
         borderRadius: BorderRadius.circular(16),
       ),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            promo.title,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
+      padding: const EdgeInsets.all(16),
+      // FittedBox(scaleDown) keeps the promo copy inside the fixed-height
+      // carousel on narrow screens / large text scales — no horizontal or
+      // vertical RenderFlex overflow, at the cost of a tiny scale-down.
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                promo.title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                promo.subtitle,
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.9)),
+              ),
+            ],
           ),
-          const SizedBox(height: 4),
-          Text(
-            promo.subtitle,
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.9)),
-          ),
-        ],
+        ),
       ),
     );
   }

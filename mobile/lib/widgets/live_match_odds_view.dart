@@ -113,6 +113,13 @@ class MyanmarFontDetector {
   static const String zawgyiFontFamily = 'Zawgyi-One';
   static const String unicodeFontFamily = 'Pyidaungsu';
 
+  // Per-string font cache: the WS live-odds view re-renders on every pushed
+  // frame with largely the same payloads (team names, odds-type labels), so
+  // re-running regex classification each build would waste CPU. Detection is
+  // stateless, so a process-shared bounded cache is safe to use.
+  static const int _cacheCap = 512;
+  static final Map<String, String> _familyCache = {};
+
   /// Returns `true` when the payload uses the legacy Zawgyi layout.
   static bool isZawgyi(String? payload) {
     if (payload == null || payload.isEmpty) return false;
@@ -121,9 +128,17 @@ class MyanmarFontDetector {
   }
 
   /// Assembles text with the font family matching the payload typography.
-  /// Falls back to Unicode (Pyidaungsu) for non-Myanmar strings.
-  static String fontFamilyFor(String? payload) =>
-      isZawgyi(payload) ? zawgyiFontFamily : unicodeFontFamily;
+  /// Falls back to Unicode (Pyidaungsu) for non-Myanmar strings. Detected
+  /// families are cached per string to avoid re-detection across WS frames.
+  static String fontFamilyFor(String? payload) {
+    if (payload == null || payload.isEmpty) return unicodeFontFamily;
+    final cached = _familyCache[payload];
+    if (cached != null) return cached;
+    if (_familyCache.length >= _cacheCap) _familyCache.clear();
+    final family = isZawgyi(payload) ? zawgyiFontFamily : unicodeFontFamily;
+    _familyCache[payload] = family;
+    return family;
+  }
 }
 
 // ============================================================================

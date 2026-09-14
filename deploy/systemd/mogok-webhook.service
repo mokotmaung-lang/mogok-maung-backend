@@ -1,0 +1,39 @@
+# ==============================================================================
+# /etc/systemd/system/mogok-webhook.service — Mogok Maung bot webhook intake.
+#
+# Receives Viber/Telegram "deposit/withdraw" messages on 127.0.0.1:8090,
+# verifies the platform signature, maps sender -> user via bot_links and pushes
+# audited PENDING unit_requests to agent_unit_request_queue. Optional service —
+# only enable when TELEGRAM_WEBHOOK_SECRET / VIBER_AUTH_TOKEN are set.
+#
+#   sudo install -m 0644 deploy/systemd/mogok-webhook.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now mogok-webhook
+# ==============================================================================
+
+[Unit]
+Description=Mogok Maung bot webhook worker (Viber/Telegram)
+After=network-online.target mogok-api.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=mogok
+Group=mogok
+WorkingDirectory=/opt/mogok-maung
+EnvironmentFile=/opt/mogok-maung/.env.production
+Environment=HTTP_ADDR=:8090
+# Keep this bound to loopback and proxy through nginx; never expose :8090
+# directly to the internet.
+ExecStart=/opt/mogok-maung/build/webhook
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/shopspring/decimal"
+
 	"mogok-maung-backend/pkg/bet"
 )
 
@@ -197,7 +199,11 @@ func (s *Settler) settleBet(ctx context.Context, ev SettlementEvent, betID int64
 	if err != nil {
 		return err
 	}
-	payout := round2(rec.TotalStake * combined)
+	// Guardrail: ALL money math runs in fixed-point decimal — never raw float64
+	// for currency/multiplier arithmetic (0.1+0.2 != 0.3 float bias). Float64
+	// exists only at the DB scan/write boundary below.
+	money := func(v float64) decimal.Decimal { return decimal.NewFromFloat(v) }
+	payout := money(rec.TotalStake).Mul(money(combined)).Round(2).InexactFloat64()
 
 	// Lock the user's wallet row to serialize against concurrent operations
 	// (place-bet, withdraw, other settlements).
@@ -214,17 +220,18 @@ func (s *Settler) settleBet(ctx context.Context, ev SettlementEvent, betID int64
 	}
 
 	// Wallet release: the original hold is cleared; wins are credited on top.
-	newHold := hold - rec.HoldAmount
-	if newHold < 0 {
-		newHold = 0 // guard against float drift / partial holds
+	// Computed in decimal (guardrail), converted to float64 only for the SQL write.
+	newHold := money(hold).Sub(money(rec.HoldAmount))
+	if newHold.LessThan(decimal.Zero) {
+		newHold = decimal.Zero // guard against float drift / partial holds
 	}
-	newCurrent := round2(current + payout)
+	newCurrent := money(current).Add(money(payout)).Round(2)
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE users
 		    SET current_balance = $1, hold_balance = $2, updated_at = CURRENT_TIMESTAMP
 		  WHERE id = $3`,
-		newCurrent, newHold, rec.UserID,
+		newCurrent.InexactFloat64(), newHold.InexactFloat64(), rec.UserID,
 	)
 	if err != nil {
 		return fmt.Errorf("update user %d wallet: %w", rec.UserID, err)

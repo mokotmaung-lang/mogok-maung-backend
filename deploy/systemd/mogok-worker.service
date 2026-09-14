@@ -1,0 +1,35 @@
+# ==============================================================================
+# /etc/systemd/system/mogok-worker.service — Mogok Maung settlement worker.
+#
+# Consumes match_settlement_queue (RabbitMQ) and settles PENDING Maung/Body
+# bets ACID-ly. Companions the API service; see mogok-api.service for layout.
+#
+#   sudo install -m 0644 deploy/systemd/mogok-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now mogok-worker
+# ==============================================================================
+
+[Unit]
+Description=Mogok Maung settlement worker
+After=network-online.target mogok-api.service rabbitmq.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=mogok
+Group=mogok
+WorkingDirectory=/opt/mogok-maung
+EnvironmentFile=/opt/mogok-maung/.env.production
+Environment=SETTLEMENT_PREFETCH=10
+ExecStart=/opt/mogok-maung/build/worker
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

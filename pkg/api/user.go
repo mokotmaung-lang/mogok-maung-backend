@@ -216,6 +216,83 @@ func (h *UserHandler) CreateUnitsRequest(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// unitRequestTicket is one row in the caller's deposit/withdrawal history.
+type unitRequestTicket struct {
+	ID        int64     `json:"id"`
+	Amount    float64   `json:"amount"`
+	Type      string    `json:"type"` // DEPOSIT | WITHDRAW
+	Status    string    `json:"status"`
+	Note      string    `json:"note,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListMyUnitRequests returns the caller's own DEPOSIT / WITHDRAW tickets,
+// newest first, backing the mobile Transaction History screen.
+//
+//	GET /api/v1/user/units/requests
+//
+// Response: { "success": true, "data": { "requests": [...] } }
+func (h *UserHandler) ListMyUnitRequests(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.PrincipalFrom(r.Context())
+
+	rows, err := h.db.QueryContext(r.Context(), `
+		SELECT id, amount, type, status,
+		       COALESCE(payment_info::text, '') AS payment_info,
+		       created_at
+		  FROM unit_requests
+		 WHERE requester_id = $1
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 100`, p.UserID)
+	if err != nil {
+		log.Printf("user: list unit requests %d: %v", p.UserID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	defer rows.Close()
+
+	requests := make([]unitRequestTicket, 0)
+	for rows.Next() {
+		var t unitRequestTicket
+		var paymentInfo string
+		if err := rows.Scan(&t.ID, &t.Amount, &t.Type, &t.Status, &paymentInfo, &t.CreatedAt); err != nil {
+			log.Printf("user: scan unit request row: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		t.Note = noteFromPaymentInfo(paymentInfo)
+		requests = append(requests, t)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("user: iterate unit requests %d: %v", p.UserID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "ယူနစ်တောင်းဆိုမှုမှတ်တမ်း အောင်မြင်စွာ ရရှိပါပြီ။",
+		"data": map[string]interface{}{
+			"requests": requests,
+		},
+	})
+}
+
+// noteFromPaymentInfo pulls the "note" sub-field out of the JSONB payment_info
+// blob written by CreateUnitsRequest, tolerating missing/malformed payloads.
+func noteFromPaymentInfo(paymentInfo string) string {
+	if paymentInfo == "" {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(paymentInfo), &m); err != nil {
+		return ""
+	}
+	if s, ok := m["note"].(string); ok {
+		return s
+	}
+	return ""
+}
+
 // betSelectionDetail is one leg of a bet: the match, the pick and the odds
 // actually used at settlement (Myanmar multiplier or Body payout profile).
 type betSelectionDetail struct {

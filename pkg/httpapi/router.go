@@ -16,13 +16,24 @@ import (
 	"mogok-maung-backend/pkg/worker"
 )
 
-// healthHandler reports liveness+DB connectivity on both /health and its
-// versioned alias /api/v1/health (used by load balancers and deploy scripts).
-func healthHandler(db *sql.DB) http.HandlerFunc {
+// healthHandler reports liveness + DB (+ Redis when the live gateway is wired)
+// connectivity on both /health and its versioned alias /api/v1/health (used by
+// load balancers, smoke tests and deploy scripts). A 503 is returned as soon
+// as PostgreSQL OR Redis becomes unreachable, so the probe only ever sees 200
+// "ok" when every backend dependency answers.
+func healthHandler(db *sql.DB, live *websocket.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := database.HealthCheck(db); err != nil {
-			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
+			http.Error(w, "unhealthy: database", http.StatusServiceUnavailable)
 			return
+		}
+		if live != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			if err := live.Ping(ctx); err != nil {
+				http.Error(w, "unhealthy: redis", http.StatusServiceUnavailable)
+				return
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
@@ -55,9 +66,9 @@ func NewRouter(db *sql.DB, jwtSecret string,
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Mogok Maung Backend API")
 	})
-	mux.HandleFunc("/health", healthHandler(db))
+	mux.HandleFunc("/health", healthHandler(db, live))
 	// Versioned alias used by the staging/health probes (deploy-staging.sh).
-	mux.HandleFunc("/api/v1/health", healthHandler(db))
+	mux.HandleFunc("/api/v1/health", healthHandler(db, live))
 
 	// 0. Authentication (public).
 	api.NewAuthHandler(db, jwtSecret, 24*time.Hour).Routes(mux)
@@ -90,6 +101,8 @@ func NewRouter(db *sql.DB, jwtSecret string,
 		auth.Chain(uh.ChangePassword, authMw, anyRole))
 	mux.Handle("POST /api/v1/units/request",
 		auth.Chain(uh.CreateUnitsRequest, authMw, anyRole))
+	mux.Handle("GET /api/v1/user/units/requests",
+		auth.Chain(uh.ListMyUnitRequests, authMw, anyRole))
 
 	// 2. Super admin control plane.
 	// onOddsChange fans status/odds updates to the live-odds gateway.
@@ -120,6 +133,10 @@ func NewRouter(db *sql.DB, jwtSecret string,
 		auth.Chain(ag.CreateDownlineUser, authMw, agentRoles))
 	mux.Handle("POST /api/v1/agent/points/request",
 		auth.Chain(ag.CreateUnitRequest, authMw, agentRoles))
+	mux.Handle("POST /api/v1/agent/unit-requests",
+		auth.Chain(ag.CreateAgentUnitRequest, authMw, agentRoles))
+	mux.Handle("POST /api/v1/agent/units/transfer",
+		auth.Chain(ag.TransferDownlineUnits, authMw, agentRoles))
 	mux.Handle("GET /api/v1/agent/downlines",
 		auth.Chain(ag.ListDownlines, authMw, agentRoles))
 	mux.Handle("GET /api/v1/agent/users/summary",
@@ -140,5 +157,5 @@ func NewRouter(db *sql.DB, jwtSecret string,
 	mux.Handle("POST /api/v1/admin/settlements/weekly/settle",
 		auth.Chain(sm.MarkWeeklySettled, authMw, adminSettleRoles))
 
-	return mux
+	return NewCORS(mux)
 }

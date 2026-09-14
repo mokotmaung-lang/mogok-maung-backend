@@ -7,13 +7,18 @@
 --
 --   psql "$RECOVERED_CONN" -v ON_ERROR_STOP=1 -f scripts/dr/verify-ledger.sql
 --
--- Ledger convention: unit_ledger.amount_change is signed (+credit / -debit).
--- Invariant:  users.current_balance + users.hold_balance == SUM(amount_change)
--- Holding is a zero-sum movement (current -stake, hold +stake), so the sum of
--- the ledger ALWAYS equals the combined spendable+held balance.
+-- Ledger convention: unit_ledger.amount_change is signed (+credit / -debit),
+-- and each row's balance_before/after track the CURRENT balance transitions.
+-- Invariant (Core Rule 2):  users.current_balance == SUM(amount_change).
+-- hold_balance is a reservation account mutated OUTSIDE the ledger (a BET_HOLD
+-- debits current via a ledger row while the money is parked in hold; on
+-- settlement hold is released silently and current is re-credited through a
+-- BET_WIN/BET_LOSE ledger row). Therefore hold_balance must NEVER be summed
+-- into the ledger parity check — doing so produces a false delta equal to the
+-- outstanding hold whenever any bet is still pending.
 -- =============================================================================
 
-\echo '=== 1) Per-user ledger parity (expect ZERO rows) ==='
+\echo '=== 1) Per-user current-balance parity (expect ZERO rows) ==='
 WITH ledger AS (
     SELECT user_id, ROUND(SUM(amount_change)::numeric, 2) AS ledger_total
       FROM unit_ledger
@@ -24,15 +29,18 @@ SELECT u.id,
        u.role,
        ROUND(u.current_balance, 2) AS current,
        ROUND(u.hold_balance, 2)    AS held,
-       (ROUND(u.current_balance, 2) + ROUND(u.hold_balance, 2)) AS combined,
        l.ledger_total,
-       (ROUND(u.current_balance, 2) + ROUND(u.hold_balance, 2))
-         - l.ledger_total                                        AS delta
+       (ROUND(u.current_balance, 2) - l.ledger_total) AS delta
   FROM users u
   JOIN ledger l ON l.user_id = u.id
- WHERE ABS((ROUND(u.current_balance, 2) + ROUND(u.hold_balance, 2))
-          - l.ledger_total) > 0.01
+ WHERE ABS(ROUND(u.current_balance, 2) - l.ledger_total) > 0.01
  ORDER BY delta DESC;
+
+\echo '=== 1b) Negative holds (expect ZERO rows) ==='
+SELECT id, username, hold_balance
+  FROM users
+ WHERE hold_balance < 0
+ ORDER BY id;
 
 \echo '=== 2) Ledger chain consistency (expect ZERO rows) ==='
 -- Each row's balance_before must equal the previous row's balance_after when
