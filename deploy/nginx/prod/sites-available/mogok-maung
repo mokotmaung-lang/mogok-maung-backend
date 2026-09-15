@@ -28,8 +28,7 @@ server {
 
 # --- API (api.oddsmyanmar.online) ------------------------------------------------------
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name api.oddsmyanmar.online;
 
     ssl_certificate     /etc/letsencrypt/live/oddsmyanmar.online/fullchain.pem;
@@ -115,8 +114,7 @@ server {
 
 # --- Main domain (oddsmyanmar.online) — Flutter Web SPA + dashboard --------------------
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name oddsmyanmar.online;
 
     ssl_certificate     /etc/letsencrypt/live/oddsmyanmar.online/fullchain.pem;

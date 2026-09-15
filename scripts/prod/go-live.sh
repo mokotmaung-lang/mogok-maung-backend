@@ -2,13 +2,13 @@
 # ==============================================================================
 # go-live.sh — END-TO-END one-shot production rollout for the Mogok Maung VPS.
 #
-# Run ON the VPS (root). Normally handed off by deploy-vps.sh (clone+env) , or
+# Run ON the VPS (root). Normally handed off by deploy-vps.sh (clone+env), or
 # directly after rsync brought the repo to /opt/mogok-maung:
 #   ssh root@VPS_IP
 #   cd /opt/mogok-maung && bash scripts/prod/go-live.sh
 #
 # Steps (all idempotent):
-#   1. bootstrap docker + compose + ufw (ports 22/80/443)     [VPS only]
+#   1. bootstrap docker + compose + ufw (SSH ${SSH_PORT}, 22, 80/443) [VPS only]
 #   2. autofill real secrets in .env.production (never clobber real values)
 #   3. public DNS pre-check against 8.8.8.8 (DOMAINS from env/default)
 #   4. postgres TLS certs  (scripts/prod/setup-db-tls.sh)

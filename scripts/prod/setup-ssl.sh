@@ -22,12 +22,23 @@ APEX="${DOMAINS%% *}"
 apt-get update -y
 apt-get install -y nginx openssl
 
-# certbot (snap is the officially recommended path).
+# certbot (snap is the officially recommended path; fall back to apt if snap
+# is unavailable on this Ubuntu image). CERTBOT_SOURCE decides the renewal
+# timer below — capture it BEFORE the /usr/bin symlink.
+CERTBOT_SOURCE=""
 if [ ! -x /usr/bin/certbot ] && [ ! -x /snap/bin/certbot ]; then
     apt-get remove -y certbot 2>/dev/null || true
-    snap install --classic certbot
-    ln -sf /snap/bin/certbot /usr/bin/certbot
+    if snap install --classic certbot 2>/dev/null; then
+        CERTBOT_SOURCE=snap
+    else
+        echo "[ssl] snap unavailable — installing certbot via apt..."
+        apt-get install -y certbot
+        CERTBOT_SOURCE=apt
+    fi
+else
+    { [ -x /snap/bin/certbot ] && CERTBOT_SOURCE=snap; } || CERTBOT_SOURCE=apt
 fi
+ln -sf "$(command -v certbot)" /usr/bin/certbot
 
 # Install the production edge config (guardrail http level + vhosts).
 cp -f infrastructure/nginx/cloudflare-ips.conf   /etc/nginx/cloudflare-ips.conf
@@ -55,9 +66,13 @@ certbot certonly --webroot -w /var/www/certbot \
     -d "${DOMAINS// / -d }"
 
 nginx -t
-systemctl reload nginx
+systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
 echo "[certbot] certbot renewal timer:"
-systemctl enable --now snap.certbot.renew.timer 2>/dev/null || systemctl enable --now certbot.timer
+if [ "${CERTBOT_SOURCE}" = "snap" ]; then
+    systemctl enable --now snap.certbot.renew.timer 2>/dev/null || true
+else
+    systemctl enable --now certbot.timer 2>/dev/null || true
+fi
 
 echo "[ssl] done — https://api.<apex> (API) and https://<apex> (SPA) are live (auto-renew via systemd timer): ${DOMAINS}"

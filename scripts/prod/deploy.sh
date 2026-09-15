@@ -113,6 +113,15 @@ else
     echo "[2/8] JWT_SECRET present (${#JWT_SECRET} chars)"
 fi
 
+# SUPER_ADMIN bootstrap password must never stay at a CHANGE_ME placeholder.
+if [ -z "${BOOT_ADMIN_PASS:-}" ] || [[ "${BOOT_ADMIN_PASS}" == CHANGE_ME* ]]; then
+    BOOT_ADMIN_PASS="$(openssl rand -base64 24)"
+    sed -i "s/^BOOT_ADMIN_PASS=.*/BOOT_ADMIN_PASS=${BOOT_ADMIN_PASS}/" "${ENV_FILE}"
+    echo "[2/8] generated BOOT_ADMIN_PASS (bootstrap SUPER_ADMIN) and wrote it into ${ENV_FILE}"
+else
+    echo "[2/8] BOOT_ADMIN_PASS present (${#BOOT_ADMIN_PASS} chars)"
+fi
+
 # --- 3. Postgres TLS certs ------------------------------------------------------
 echo "[3/8] postgres TLS..."
 "${REPO_DIR}/scripts/prod/setup-db-tls.sh"

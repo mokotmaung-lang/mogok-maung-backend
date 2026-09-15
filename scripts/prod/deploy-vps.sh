@@ -8,7 +8,7 @@
 # What it does (everything below is idempotent — safe to re-run):
 #   0. sanity: run-as-root, config block, docker install (get.docker.com w/ apt fallback)
 #   1. /opt/mogok-maung + git clone (URL below; falls back to git pull if present)
-#   2. .env.production created from the embedded template when missing
+#   2. .env.production created from the committed .env.production.example
 #      (real secrets are generated automatically by go-live — never type them)
 #   3. delegates to scripts/prod/go-live.sh:  tls->ssl->deploy->public verify
 #
