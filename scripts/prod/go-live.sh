@@ -29,6 +29,7 @@ VPS_IP=${VPS_IP:-104.207.77.242}
 SSH_PORT=${SSH_PORT:-22022}
 APEX="${DOMAINS%% *}"
 API="${DOMAINS##* }"
+export EMAIL DOMAINS VPS_IP SSH_PORT APEX API
 
 cd "${REPO_DIR}"
 [ -f "${ENV_FILE}" ] || { echo "[go-live] missing ${ENV_FILE} — run rsync-deploy.sh first"; exit 1; }
@@ -63,17 +64,16 @@ echo "[2/7] secrets..."
 set_secret() { # $1=key $2=val
     local key="$1" val="$2" cur
     cur="$(grep -E "^${key}=" "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)"
-    case "${cur}" in
-        ""|CHANGE_ME*)
-            if grep -qE "^${key}=" "${ENV_FILE}"; then
-                sed -i "s|^${key}=.*|${key}=${val}|" "${ENV_FILE}"
-            else
-                printf '%s=%s\n' "${key}" "${val}" >> "${ENV_FILE}"
-            fi
-            echo "      ${key} = <generated>"
-            ;;
-        *) echo "      ${key} = <kept existing>" ;;
-    esac
+    if [[ -z "${cur}" || "${cur}" == *CHANGE_ME* ]]; then
+        if grep -qE "^${key}=" "${ENV_FILE}"; then
+            sed -i "s|^${key}=.*|${key}=${val}|" "${ENV_FILE}"
+        else
+            printf '%s=%s\n' "${key}" "${val}" >> "${ENV_FILE}"
+        fi
+        echo "      ${key} = <generated>"
+    else
+        echo "      ${key} = <kept existing>"
+    fi
 }
 
 set_secret DB_PASSWORD        "$(openssl rand -base64 32)"
