@@ -25,7 +25,8 @@ REPO_DIR=/opt/mogok-maung
 ENV_FILE="${REPO_DIR}/.env.production"
 EMAIL=${EMAIL:-admin@oddsmyanmar.online}
 DOMAINS=${DOMAINS:-"oddsmyanmar.online api.oddsmyanmar.online"}
-VPS_IP=${VPS_IP:-203.31.93.52}
+VPS_IP=${VPS_IP:-104.207.77.242}
+SSH_PORT=${SSH_PORT:-22022}
 APEX="${DOMAINS%% *}"
 API="${DOMAINS##* }"
 
@@ -50,7 +51,8 @@ else
 fi
 
 if command -v ufw >/dev/null 2>&1 && ! ufw status | grep -q "Status: active"; then
-    echo "[1/7] enabling ufw (22 + 80,443)..."
+    echo "[1/7] enabling ufw (SSH ${SSH_PORT} + 22 + 80,443)..."
+    ufw allow "${SSH_PORT}/tcp"
     ufw allow OpenSSH
     ufw allow 80,443/tcp
     echo y | ufw enable
