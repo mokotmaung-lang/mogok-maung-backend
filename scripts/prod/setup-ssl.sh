@@ -58,12 +58,17 @@ rm -f /etc/nginx/sites-enabled/default
 
 mkdir -p /var/www/certbot
 
+# Expand the SAN list into separate `-d` arguments. Do NOT quote the whole
+# "a -d b" string — certbot would reject "a -d b" as a single domain name.
+CERT_ARGS=()
+for d in ${DOMAINS}; do CERT_ARGS+=( -d "${d}" ); done
+
 echo "[certbot] obtaining certificates for: ${DOMAINS} (webroot)..."
 certbot certonly --webroot -w /var/www/certbot \
     --non-interactive \
     --agree-tos \
     -m "${EMAIL}" \
-    -d "${DOMAINS// / -d }"
+    "${CERT_ARGS[@]}"
 
 nginx -t
 systemctl reload nginx 2>/dev/null || systemctl restart nginx
