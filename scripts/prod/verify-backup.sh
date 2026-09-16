@@ -26,6 +26,9 @@ echo "newest enc:   ${NEWEST_ENC}"
 if [ -n "${NEWEST_ENC}" ] && [ -f "${NEWEST_ENC}" ]; then
     KEY_HEX="$(grep -E '^BACKUP_KEY=' .env.production | cut -d= -f2- | openssl dgst -sha256 | awk '{print $2}')"
     openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "${NEWEST_ENC}" \
-        -pass "pass:${KEY_HEX}" 2>/dev/null | gzip -dc | head -c 60 | od -An -c | head -1
+        -pass "pass:${KEY_HEX}" 2>/dev/null | docker exec -i mm-postgres pg_restore \
+        --list /dev/stdin | grep -q 'Table of contents' && echo '  pg_restore --list OK (AES decrypt → custom dump)'
+    # NOTE: dump is pg_dump custom-format (zlib), NOT gzip — integrity gate is
+    # pg_restore --list (read-only), never `gzip -t`/`gzip -dc` (false-fail).
     echo '  (AES header "PGDMP" = classic dump OK)'
 fi
