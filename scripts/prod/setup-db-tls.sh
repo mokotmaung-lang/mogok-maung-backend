@@ -31,6 +31,16 @@ openssl req -new -x509 \
     >/dev/null 2>&1
 
 chmod 600 "${TLS_DIR}/server.key"
+chmod 644 "${TLS_DIR}/server.crt"
+# The official postgres image runs as UID 999. A root-owned 0600 server.key
+# bind-mounted into /tls would crash the container with
+#   could not load private key file "/tls/server.key": Permission denied
+# so hand ownership to that UID (best-effort — harmless on non-root hosts).
+if command -v chown >/dev/null 2>&1; then
+    chown -R 999:999 "${TLS_DIR}" 2>/dev/null || {
+        echo "[tls] WARNING: could not chown ${TLS_DIR} to 999:999 — postgres may fail with Permission denied"
+    }
+fi
 
 echo "[tls] done — ${TLS_DIR}/server.crt + server.key written ($(now))"
 echo "[tls] start postgres, then the API uses DB_SSLMODE=require automatically."
