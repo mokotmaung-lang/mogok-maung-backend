@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =========================================================================== #
-# watchdog-prod.sh — every-5-min PROD self-heal sweep.
+# watchdog-prod.sh ??? every-5-min PROD self-heal sweep.
 #
 #   bash scripts/prod/watchdog-prod.sh [--run|--check|--install-cron]
 #                                        [--no-restart] [--silent]
@@ -17,7 +17,7 @@
 # (60/120/240s, max 3 attempts). Never stops/downs the stack, never drops the
 # DB, never replays events. On incident (down after backoff sweep) it writes
 # an incident file + optionally POSTs NOTIFY_WEBHOOK (set in
-# .env.production). Money-safe by construction: no pg_dump, no restore —
+# .env.production). Money-safe by construction: no pg_dump, no restore ???
 # backup-db.sh / restore-db.sh own those and require the stack down.
 #
 # Cron (idempotent): `*/5 * * * * cd ${REPO_DIR} && bash scripts/prod/
@@ -38,6 +38,7 @@ for a in "$@"; do
     case "${a}" in
         --check)         MODE="check" ;;
         --install-cron)  MODE="cron" ;;
+        --run)           MODE="run" ;;
         --no-restart)    NO_RESTART=1 ;;
         --silent)        SILENT=1 ;;
         --*)             echo "unknown arg: ${a}"; exit 1 ;;
@@ -142,7 +143,7 @@ for svc in postgres-db redis-cache rabbitmq user-service bot-webhook-worker sett
     fi
 
     rc=1
-    echo "[watchdog] ${svc}: DOWN — ${reason} (restart backoff exhausted, incident @ ${stamp})"
+    echo "[watchdog] ${svc}: DOWN ??? ${reason} (restart backoff exhausted, incident @ ${stamp})"
     mkdir -p "${LOG_DIR}/incidents"
     printf '%s|%s|%s\n' "${stamp}" "${svc}" "${reason}" \
         > "${LOG_DIR}/incidents/${stamp}.${svc}.incident"
