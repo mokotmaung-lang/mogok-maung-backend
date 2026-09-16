@@ -56,13 +56,13 @@ log() { printf '%s %s\n' "$(date -u +%Y%m%dT%H%M%SZ)" "${*}" >> "${LOG_FILE}"; }
 
 svc_status() {
     local svc="${1}"
-    compose_cmd ps --filter name="${svc}" --format '{{.Service}} {{.Status}}' \
-        | grep -E "^${svc} " || true
+    compose_cmd ps --no-trunc --format '{{.Service}}|{{.Status}}' 2>/dev/null \
+        | awk -F'|' -v s="${svc}" '$1==s{print; f=1} END{exit f?0:1}' || true
 }
 svc_ok() {
     local svc="${1}"
-    svc_status "${svc}" | grep -qE '\(healthy\)' \
-        || svc_status "${svc}" | grep -qE '\bUp\b'
+    svc_status "${svc}" | grep -qE '\|\(healthy\)\|' \
+        || svc_status "${svc}" | grep -qE '\|Up\b'
 }
 
 probe_user()        { curl -fsS --max-time 6 "http://127.0.0.1:8081/health" | grep -q 'ok' || return 1; }
