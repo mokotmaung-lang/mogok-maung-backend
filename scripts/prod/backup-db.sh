@@ -35,7 +35,7 @@ for a in "$@"; do
         --no-enc)         ENCRYPT=0 ;;
         --install-cron)   MODE="cron" ;;
         --list)           MODE="list" ;;
-        --keep)           continue ;;                 # two-arg: value is next token
+        --keep)           KEEP_ARG=1; continue ;;      # two-arg: value is next token
         --keep=*)         KEEP="${a#*=}" ;;
         --*)              echo "unknown arg: ${a}"; exit 1 ;;
         *)                if [[ "${KEEP_ARG:-0}" = "1" ]]; then
