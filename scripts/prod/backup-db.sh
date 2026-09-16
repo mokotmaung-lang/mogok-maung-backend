@@ -98,8 +98,7 @@ docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" exec -T "${POSTGRES
         --format=custom --compress=9 --no-owner --no-privileges \
         > "${DUMP_GZ}"
 
-# Integrity sanity: confirm the gzip header + pg_restore can list it.
-gzip -t "${DUMP_GZ}"
+# Integrity sanity: pg_restore can list it (custom format = zlib, not gzip).
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" exec -T "${POSTGRES_SERVICE}" \
     pg_restore --list < "${DUMP_GZ}" | head -5 >/dev/null && echo "[backup-db]      -> pg_restore --list OK"
 SIZE="$(du -h "${DUMP_GZ}" | cut -f1)"
