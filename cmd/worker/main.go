@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -33,7 +34,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	defer db.Close()
 
-	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
+	// AMQP_URL is REQUIRED in production — never fall back to guest defaults.
+	// deploy-vps.sh/go-live.sh auto-generate the broker creds into .env.production.
+	amqpURL := os.Getenv("AMQP_URL")
+	if amqpURL == "" {
+		return fmt.Errorf("AMQP_URL is required — set it in .env.production (go-live.sh generates it during deploy)")
+	}
 	queue := getenv("SETTLEMENT_QUEUE", "match_settlement_queue")
 
 	prefetch := 10

@@ -9,11 +9,13 @@ import (
 // CORS wrapping for the API. Local-first by default so the Flutter web app
 // (a randomly-port-spawned dev server) can talk to the API during development:
 //   - origins on http://localhost:* / http://127.0.0.1:* are always allowed
-//   - an exact-match allowlist can be configured explicitly via
+//     ONLY when STAGE_ENV != "production" (dev shell).
+//   - an exact-match allowlist is configured explicitly via
 //     CORS_ALLOWED_ORIGINS ("https://app.example.com,https://admin.example.com").
 //
-// Production is fronted by nginx (same-origin) and should pin CORS_ALLOWED_ORIGINS
-// so untrusted cross-origin pages can never read responses.
+// Production (STAGE_ENV=production, set in docker-compose.prod.yml) accepts the
+// explicit allowlist ONLY — the loopback bypass is disabled, so untrusted
+// cross-origin pages can never read responses.
 func NewCORS(next http.Handler) http.Handler {
 	allowed := map[string]struct{}{}
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
@@ -58,6 +60,11 @@ func NewCORS(next http.Handler) http.Handler {
 func originAllowed(origin string, allowed map[string]struct{}) bool {
 	if _, ok := allowed[origin]; ok {
 		return true
+	}
+	// In production only the explicit CORS_ALLOWED_ORIGINS allowlist grants
+	// access. The loopback bypass below is for local development shells only.
+	if os.Getenv("STAGE_ENV") == "production" {
+		return false
 	}
 	// Dev: any origin running on the loopback interface.
 	for _, prefix := range []string{"http://localhost:", "http://127.0.0.1:"} {

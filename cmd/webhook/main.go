@@ -303,7 +303,12 @@ func newServer() (*BotWebhookServer, error) {
 		return nil, err
 	}
 
-	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
+	// AMQP_URL is REQUIRED in production — never fall back to guest defaults.
+	// deploy-vps.sh/go-live.sh auto-generate the broker creds into .env.production.
+	amqpURL := os.Getenv("AMQP_URL")
+	if amqpURL == "" {
+		return nil, errors.New("AMQP_URL is required — set it in .env.production (go-live.sh generates it during deploy)")
+	}
 	queue := getenv("AGENT_UNIT_REQUEST_QUEUE", "agent_unit_request_queue")
 
 	return &BotWebhookServer{

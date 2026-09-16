@@ -155,6 +155,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       AUTO_MIGRATE: "true"
       MIGRATIONS_DIR: /app/migrations
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS in .env.production}
       AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
       SETTLEMENT_QUEUE: ${SETTLEMENT_QUEUE:-match_settlement_queue}
       AGENT_UNIT_REQUEST_QUEUE: ${AGENT_UNIT_REQUEST_QUEUE:-agent_unit_request_queue}

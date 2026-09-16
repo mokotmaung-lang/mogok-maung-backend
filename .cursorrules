@@ -13,3 +13,6 @@
 
 ## 3. DEPLOYMENT DIRECTIVE
 When generating deployment scripts, Nginx configs, or SSL commands, you MUST use `oddsmyanmar.online` and `api.oddsmyanmar.online` exclusively.
+
+## 4. LANGUAGE
+Always respond and explain in Myanmar (Burmese) only. Keep code blocks, commands, and technical identifiers (domains, IPs, ports, env keys, error strings) in English as-is.
