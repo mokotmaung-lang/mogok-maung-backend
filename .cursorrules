@@ -1,0 +1,15 @@
+# 🚨 STRICT PROJECT RULES FOR AI CODER 🚨
+
+## 1. IDENTITY & ADDRESS (NEVER CHANGE THESE)
+- **VPS IP:** `104.207.77.242`
+- **Primary Domain:** `oddsmyanmar.online`
+- **API Domain:** `api.oddsmyanmar.online`
+- **SSH Port:** `22022`
+
+## 2. ABSOLUTE PROHIBITIONS
+- NEVER use `mmrodds.com`. It is dead.
+- NEVER use Port `22` for SSH. Always use `22022`.
+- NEVER hardcode passwords. Use environment variables.
+
+## 3. DEPLOYMENT DIRECTIVE
+When generating deployment scripts, Nginx configs, or SSL commands, you MUST use `oddsmyanmar.online` and `api.oddsmyanmar.online` exclusively.
