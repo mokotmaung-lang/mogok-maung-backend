@@ -35,12 +35,20 @@ for a in "$@"; do
         --no-enc)         ENCRYPT=0 ;;
         --install-cron)   MODE="cron" ;;
         --list)           MODE="list" ;;
-        --keep)           echo "USE --keep N (two-arg)"; exit 1 ;;
+        --keep)           continue ;;                 # two-arg: value is next token
         --keep=*)         KEEP="${a#*=}" ;;
         --*)              echo "unknown arg: ${a}"; exit 1 ;;
-        *)                echo "unknown arg: ${a}"; exit 1 ;;
+        *)                if [[ "${KEEP_ARG:-0}" = "1" ]]; then
+                              KEEP="${a}"; KEEP_ARG=0
+                          else
+                              echo "unknown arg: ${a}"; exit 1
+                          fi ;;
     esac
+    # mark that the NEXT positional is the value for a bare --keep
+    [[ "${a}" = "--keep" ]] && KEEP_ARG=1
 done
+[ -z "${KEEP_ARG:-}" ] || KEEP_ARG=0
+[ -n "${KEEP:-}" ] || KEEP=14
 
 [ -f "${ENV_FILE}" ] || { echo "[backup-db] missing ${ENV_FILE} — run go-live.sh first"; exit 1; }
 
