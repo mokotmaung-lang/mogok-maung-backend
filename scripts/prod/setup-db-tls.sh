@@ -32,14 +32,23 @@ openssl req -new -x509 \
 
 chmod 600 "${TLS_DIR}/server.key"
 chmod 644 "${TLS_DIR}/server.crt"
-# The official postgres image runs as UID 999. A root-owned 0600 server.key
-# bind-mounted into /tls would crash the container with
+# Postgres requires the private key to be owned by the database user (or root)
+# with mode 0600 — otherwise the container dies with
 #   could not load private key file "/tls/server.key": Permission denied
-# so hand ownership to that UID (best-effort — harmless on non-root hosts).
-if command -v chown >/dev/null 2>&1; then
-    chown -R 999:999 "${TLS_DIR}" 2>/dev/null || {
-        echo "[tls] WARNING: could not chown ${TLS_DIR} to 999:999 — postgres may fail with Permission denied"
-    }
+# or "must be owned by the database user or root". The Alpine image uses a
+# different UID than the Debian image, so detect it from the ACTUAL image
+# (override with PG_TLS_UID / POSTGRES_IMG if you change the compose image).
+POSTGRES_IMG=${POSTGRES_IMG:-postgres:16-alpine}
+PG_TLS_UID=${PG_TLS_UID:-}
+if [ -z "${PG_TLS_UID}" ] && command -v docker >/dev/null 2>&1; then
+    PG_TLS_UID="$(docker run --rm --entrypoint id "${POSTGRES_IMG}" postgres 2>/dev/null \
+        | sed -n 's/^uid=\([0-9]*\).*/\1/p')"
+fi
+PG_TLS_UID=${PG_TLS_UID:-70}
+if chown -R "${PG_TLS_UID}:${PG_TLS_UID}" "${TLS_DIR}" 2>/dev/null; then
+    echo "[tls] key owned by postgres UID ${PG_TLS_UID}"
+else
+    echo "[tls] WARNING: could not chown ${TLS_DIR} to ${PG_TLS_UID} — postgres may fail with Permission denied"
 fi
 
 echo "[tls] done — ${TLS_DIR}/server.crt + server.key written ($(now))"
