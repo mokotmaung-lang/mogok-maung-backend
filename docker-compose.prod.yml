@@ -165,6 +165,16 @@ services:
       AGENT_UNIT_REQUEST_QUEUE: ${AGENT_UNIT_REQUEST_QUEUE:-agent_unit_request_queue}
       STAGE_ENV: production
       DOMAIN_NAME: ${DOMAIN_NAME:-}
+      # Sports feed provider (GET /api/v1/admin/fixtures/sync): offline mock is
+      # the default until a physical API-Football key is provisioned. Toggle to
+      # the live feed by setting SPORTS_API_MOCK=false + SPORTS_API_KEY/LEAGUE.
+      SPORTS_API_PROVIDER: ${SPORTS_API_PROVIDER:-mock}
+      SPORTS_API_MOCK: ${SPORTS_API_MOCK:-true}
+      SPORTS_API_URL: ${SPORTS_API_URL:-}
+      SPORTS_API_KEY: ${SPORTS_API_KEY:-}
+      SPORTS_API_LEAGUE: ${SPORTS_API_LEAGUE:-}
+      SPORTS_API_SEASON: ${SPORTS_API_SEASON:-}
+      SPORTS_API_STATUS: ${SPORTS_API_STATUS:-}
     depends_on:
       postgres-db:
         condition: service_healthy
