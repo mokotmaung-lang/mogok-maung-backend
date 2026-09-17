@@ -391,6 +391,151 @@ func (h *AdminHandler) AllocateUnits(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type agentCreditRequest struct {
+	Amount         float64 `json:"amount"`
+	AllocationType string  `json:"allocation_type"` // STANDARD_PURCHASE | COMMISSION_BONUS
+	Note           string  `json:"note"`
+}
+
+// agentCreditLedgerType maps an admin allocation type to the immutable ledger's
+// trx_type tag. STANDARD_PURCHASE is a money-backed unit purchase and lands as
+// DEPOSIT; COMMISSION_BONUS is promotional credit (units granted as commission)
+// and lands as the dedicated COMMISSION_ADD tag so commission flows are
+// statistically separable from paid unit purchases on the ledger.
+func agentCreditLedgerType(allocationType string) (string, bool) {
+	switch strings.ToUpper(strings.TrimSpace(allocationType)) {
+	case "STANDARD_PURCHASE":
+		return "DEPOSIT", true
+	case "COMMISSION_BONUS":
+		return "COMMISSION_ADD", true
+	default:
+		return "", false
+	}
+}
+
+// CreditAgent is the Super Admin's agent unit-funding endpoint, separating
+// paid purchases from promotional commission credits:
+//
+//		POST /api/v1/admin/agents/{agent_id}/credit
+//		{ "amount": 50000, "allocation_type": "STANDARD_PURCHASE", "note": "..." }
+//
+//	  - allocation_type STANDARD_PURCHASE -> ledger type DEPOSIT (paid purchase)
+//	  - allocation_type COMMISSION_BONUS  -> ledger type COMMISSION_ADD (promo)
+//
+// One ACID transaction: the agent's wallet row is locked FOR UPDATE (role is
+// re-verified inside the lock), the balance is credited in fixed-point decimal,
+// and the immutable unit_ledger is appended with exact before/after states. A
+// deferred tx.Rollback() guarantees nothing partial persists when the request
+// context dies mid-flight.
+func (h *AdminHandler) CreditAgent(w http.ResponseWriter, r *http.Request) {
+	agentID, err := strconv.ParseInt(r.PathValue("agent_id"), 10, 64)
+	if err != nil || agentID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid agent_id path parameter")
+		return
+	}
+
+	var req agentCreditRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Amount <= 0 {
+		writeError(w, http.StatusBadRequest, "amount must be greater than zero")
+		return
+	}
+	allocation := strings.ToUpper(strings.TrimSpace(req.AllocationType))
+	ledgerType, ok := agentCreditLedgerType(req.AllocationType)
+	if !ok {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("allocation_type must be STANDARD_PURCHASE or COMMISSION_BONUS; got %q", req.AllocationType))
+		return
+	}
+	note := strings.TrimSpace(req.Note)
+	if len(note) > 500 {
+		writeError(w, http.StatusBadRequest, "note must be 500 characters or fewer")
+		return
+	}
+	if note == "" {
+		note = fmt.Sprintf("%s unit credit from Super Admin", allocation)
+	}
+
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	defer tx.Rollback() // no-op after Commit.
+
+	// Pessimistic lock on the agent wallet, role re-checked inside the lock.
+	var (
+		username string
+		name     string
+		current  float64
+		hold     float64
+	)
+	err = tx.QueryRowContext(r.Context(),
+		`SELECT username, name, current_balance, hold_balance
+		   FROM users WHERE id = $1 AND role = 'AGENT' FOR UPDATE`,
+		agentID,
+	).Scan(&username, &name, &current, &hold)
+	if isNoRows(err) {
+		writeError(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	if err != nil {
+		log.Printf("admin: credit lock agent %d: %v", agentID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// Fixed-point: credit the incoming amount (rounded to 2 places) via decimal.
+	amount := decimal.NewFromFloat(req.Amount).Round(2)
+	newBalance := round2(decimal.NewFromFloat(current).Add(amount).Round(2).InexactFloat64())
+
+	if _, err := tx.ExecContext(r.Context(),
+		`UPDATE users
+		    SET current_balance = $1, updated_at = CURRENT_TIMESTAMP
+		  WHERE id = $2`,
+		newBalance, agentID,
+	); err != nil {
+		log.Printf("admin: credit update agent %d: %v", agentID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// Immutable audit trail: exact before -> after for this movement.
+	if _, err := tx.ExecContext(r.Context(), `
+		INSERT INTO unit_ledger
+		    (user_id, request_id, bet_id, type, amount_change,
+		     balance_before, balance_after, description)
+		 VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6)`,
+		agentID, ledgerType, amount.InexactFloat64(), current, newBalance, note,
+	); err != nil {
+		log.Printf("admin: credit ledger agent %d: %v", agentID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("admin: credit commit agent %d: %v", agentID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("အေးဂျင့် '%s' ထံ ယူနစ် %.2f ခရက်ဒစ် ထည့်သွင်းပြီးပါပြီ (%s)", name, req.Amount, allocation),
+		"data": map[string]interface{}{
+			"agent_id":              agentID,
+			"agent_username":        username,
+			"agent_current_balance": newBalance,
+			"allocation_type":       allocation,
+			"ledger_type":           ledgerType,
+			"status":                "CREDITED",
+		},
+	})
+}
+
 type toggleFixtureRequest struct {
 	FixtureID int64 `json:"fixture_id"`
 	IsEnabled bool  `json:"is_enabled"`

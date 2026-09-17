@@ -127,6 +127,8 @@ func NewRouter(db *sql.DB, jwtSecret string,
 		auth.Chain(ah.CreateAgent, authMw, auth.RequireRole(models.RoleSuperAdmin)))
 	mux.Handle("POST /api/v1/admin/units/allocate",
 		auth.Chain(ah.AllocateUnits, authMw, auth.RequireRole(models.RoleSuperAdmin)))
+	mux.Handle("POST /api/v1/admin/agents/{agent_id}/credit",
+		auth.Chain(ah.CreditAgent, authMw, auth.RequireRole(models.RoleSuperAdmin)))
 
 	// 3. Agent tier.
 	ag := api.NewAgentHandler(db)
