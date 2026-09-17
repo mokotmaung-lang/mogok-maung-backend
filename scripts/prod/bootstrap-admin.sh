@@ -2,13 +2,18 @@
 # ==============================================================================
 # bootstrap-admin.sh — create the first SUPER_ADMIN on a production database.
 #
+# NOTE: The rigid master account (id=1 / username=sysadmin / password set in
+# the migration) is provisioned by migrations/000015_superadmin_init.up.sql at
+# API boot — it does NOT need this script. This helper remains for creating a
+# SECONDARY superadmin on untouched environments via seeders/001.
+#
 # Ordering matters: the schema is applied by the API's auto-migrator at first
 # boot (AUTO_MIGRATE=true, migrations/ applied in version order), so this runs
 # AFTER the API reports /health OK. On an already-migrated database it is a
 # no-op when a SUPER_ADMIN exists (the seeder is idempotent).
 #
 # Usage:
-#   export BOOT_ADMIN_USER=superadmin BOOT_ADMIN_PASS='<at-least-8-chars>'
+#   export BOOT_ADMIN_USER=sysadmin BOOT_ADMIN_PASS='<at-least-8-chars>'
 #   scripts/prod/bootstrap-admin.sh
 #
 # The docker-compose.prod.yml binds ./database/seeders to /seeders:ro inside
