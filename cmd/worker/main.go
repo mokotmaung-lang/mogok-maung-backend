@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"mogok-maung-backend/pkg/amqpcfg"
 	"mogok-maung-backend/pkg/database"
 	"mogok-maung-backend/pkg/worker"
 )
@@ -34,11 +35,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	defer db.Close()
 
-	// AMQP_URL is REQUIRED in production — never fall back to guest defaults.
-	// deploy-vps.sh/go-live.sh auto-generate the broker creds into .env.production.
-	amqpURL := os.Getenv("AMQP_URL")
+	// RabbitMQ is REQUIRED in production — never fall back to guest defaults.
+	// go-live.sh auto-generates RABBITMQ_USER/RABBITMQ_PASS into .env.production;
+	// amqpcfg percent-encodes them via net/url.UserPassword (raw base64
+	// passwords contain '+', '/', '=' which would corrupt the DSN).
+	amqpURL := amqpcfg.DSN()
 	if amqpURL == "" {
-		return fmt.Errorf("AMQP_URL is required — set it in .env.production (go-live.sh generates it during deploy)")
+		return fmt.Errorf("RabbitMQ is not configured — set RABBITMQ_USER and RABBITMQ_PASS in .env.production")
 	}
 	queue := getenv("SETTLEMENT_QUEUE", "match_settlement_queue")
 

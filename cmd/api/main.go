@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"mogok-maung-backend/pkg/amqpcfg"
 	"mogok-maung-backend/pkg/database"
 	"mogok-maung-backend/pkg/httpapi"
 	"mogok-maung-backend/pkg/websocket"
@@ -40,10 +41,10 @@ func main() {
 	}
 
 	// Match-result dispatch: when the admin records a final result we enqueue a
-	// SettlementEvent for the worker's match_settlement_queue. Without AMQP_URL
-	// results still persist to DB; only worker notification is skipped.
+	// SettlementEvent for the worker's match_settlement_queue. Without a broker
+	// config results still persist to DB; only worker notification is skipped.
 	var onMatchResult func(ctx context.Context, ev worker.SettlementEvent)
-	amqpURL := os.Getenv("AMQP_URL")
+	amqpURL := amqpcfg.DSN()
 	if amqpURL != "" {
 		pub := worker.NewPublisher(amqpURL, os.Getenv("SETTLEMENT_QUEUE"))
 		onMatchResult = func(ctx context.Context, ev worker.SettlementEvent) {
@@ -52,7 +53,7 @@ func main() {
 			}
 		}
 	} else {
-		log.Println("WARNING: AMQP_URL not set; match results will not be dispatched to the settlement worker")
+		log.Println("WARNING: RabbitMQ not configured (RABBITMQ_USER/RABBITMQ_PASS unset); match results will not be dispatched to the settlement worker")
 	}
 
 	// Realtime gateway: Redis Pub/Sub fan-out for /ws/live-odds plus the AMQP
@@ -83,7 +84,7 @@ func main() {
 				go live.AgentConsumerLoop(context.Background(), amqpURL, queue)
 				log.Printf("Realtime gateway enabled (redis=%s, agent queue=%s)", redisAddr, queue)
 			} else {
-				log.Printf("Realtime gateway enabled (redis=%s); agent-request fan-out disabled (no AMQP_URL)", redisAddr)
+				log.Printf("Realtime gateway enabled (redis=%s); agent-request fan-out disabled (no RabbitMQ config)", redisAddr)
 			}
 
 			// Build the fresh snapshot and push it through Redis after every

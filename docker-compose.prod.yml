@@ -156,7 +156,11 @@ services:
       AUTO_MIGRATE: "true"
       MIGRATIONS_DIR: /app/migrations
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS in .env.production}
-      AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      RABBITMQ_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env.production}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:?set RABBITMQ_PASS in .env.production}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_VHOST: "/"
       SETTLEMENT_QUEUE: ${SETTLEMENT_QUEUE:-match_settlement_queue}
       AGENT_UNIT_REQUEST_QUEUE: ${AGENT_UNIT_REQUEST_QUEUE:-agent_unit_request_queue}
       STAGE_ENV: production
@@ -200,7 +204,11 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_NAME: ${DB_NAME}
       DB_SSLMODE: require
-      AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      RABBITMQ_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env.production}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:?set RABBITMQ_PASS in .env.production}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_VHOST: "/"
       SETTLEMENT_QUEUE: ${SETTLEMENT_QUEUE:-match_settlement_queue}
       SETTLEMENT_PREFETCH: "10"
     depends_on:
@@ -241,7 +249,11 @@ services:
       DB_NAME: ${DB_NAME}
       DB_SSLMODE: require
       HTTP_ADDR: ":8090"
-      AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      RABBITMQ_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env.production}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:?set RABBITMQ_PASS in .env.production}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_VHOST: "/"
       AGENT_UNIT_REQUEST_QUEUE: ${AGENT_UNIT_REQUEST_QUEUE:-agent_unit_request_queue}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
       VIBER_AUTH_TOKEN: ${VIBER_AUTH_TOKEN:-}
@@ -259,6 +271,45 @@ services:
           memory: 128m
     healthcheck:
       disable: true
+    restart: unless-stopped
+    networks:
+      - bet_internal_network
+
+  # 7. Admin dashboard (Next.js SSR). `next start` on :3000; bound to host
+  #    loopback only. Host nginx fronts it on admin.oddsmyanmar.online (gated by
+  #    $admin_gate) and the /admin path of the main vhost. The ONLY network path
+  #    out of this container is BACKEND_URL — server components talk to the Go
+  #    API inside the compose network (no CORS, no browser exposure).
+  admin-web:
+    build:
+      context: ./admin-web
+      dockerfile: Dockerfile
+      args:
+        BACKEND_URL: http://user-service:8080
+    container_name: mm_prod_admin_web
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      PORT: "3000"
+      BACKEND_URL: ${ADMIN_WEB_BACKEND_URL:-http://user-service:8080}
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      user-service:
+        condition: service_healthy
+    mem_limit: 512m
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - bet_internal_network

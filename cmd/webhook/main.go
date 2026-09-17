@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"mogok-maung-backend/pkg/amqpcfg"
 	"mogok-maung-backend/pkg/database"
 	"mogok-maung-backend/pkg/worker"
 )
@@ -303,11 +304,13 @@ func newServer() (*BotWebhookServer, error) {
 		return nil, err
 	}
 
-	// AMQP_URL is REQUIRED in production — never fall back to guest defaults.
-	// deploy-vps.sh/go-live.sh auto-generate the broker creds into .env.production.
-	amqpURL := os.Getenv("AMQP_URL")
+	// RabbitMQ is REQUIRED in production — never fall back to guest defaults.
+	// go-live.sh auto-generates RABBITMQ_USER/RABBITMQ_PASS into .env.production;
+	// amqpcfg percent-encodes them via net/url.UserPassword so base64 passwords
+	// with '+', '/', '=' never corrupt the DSN.
+	amqpURL := amqpcfg.DSN()
 	if amqpURL == "" {
-		return nil, errors.New("AMQP_URL is required — set it in .env.production (go-live.sh generates it during deploy)")
+		return nil, errors.New("RabbitMQ is not configured — set RABBITMQ_USER and RABBITMQ_PASS in .env.production")
 	}
 	queue := getenv("AGENT_UNIT_REQUEST_QUEUE", "agent_unit_request_queue")
 
