@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -13,8 +14,10 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/shopspring/decimal"
 	"golang.org/x/crypto/bcrypt"
 	"mogok-maung-backend/pkg/auth"
+	"mogok-maung-backend/pkg/bet"
 	"mogok-maung-backend/pkg/wallet"
 )
 
@@ -34,19 +37,47 @@ func NewAgentHandler(db *sql.DB) *AgentHandler {
 }
 
 type createUserRequest struct {
-	Username string `json:"username"`
-	Phone    string `json:"phone"`
+	Username       string  `json:"username"`
+	Phone          string  `json:"phone"`
+	InitialBalance float64 `json:"initial_balance"`
 }
 
 // CreateDownlineUser provisions a USER account owned by the calling agent.
+//
+// An optional initial_balance opens the player wallet in the same atomic
+// transaction as the account row. The agent's own wallet row is locked
+// pessimistically (SELECT ... FOR UPDATE), verified for role/activity and
+// sufficiency, then debited while the new user is credited — with the standard
+// double-entry ledger written for both legs. Every step runs inside ONE
+// transaction, so a failure anywhere rolls the whole provisioning back:
+// no half-created account, no units vanishing off the agent's balance.
+//
+//	POST /api/v1/agent/users/create
+//	{ "username": "mg_min", "phone": "09...", "initial_balance": 50000 }
 func (h *AgentHandler) CreateDownlineUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
+	req.Phone = strings.TrimSpace(req.Phone)
 	if req.Username == "" || req.Phone == "" {
 		writeError(w, http.StatusBadRequest, "username and phone are required")
+		return
+	}
+	if len(req.Username) > 50 {
+		writeError(w, http.StatusBadRequest, "username must be 50 characters or fewer")
+		return
+	}
+	if len(req.Phone) > 30 {
+		writeError(w, http.StatusBadRequest, "phone must be 30 characters or fewer")
+		return
+	}
+
+	opening, ok := validateWalletAmount(req.InitialBalance)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "initial_balance must be a finite, non-negative amount")
 		return
 	}
 
@@ -59,14 +90,63 @@ func (h *AgentHandler) CreateDownlineUser(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("agent: begin create user: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	defer tx.Rollback() // no-op after Commit.
+
+	var agentBalance float64
+	if opening > 0 {
+		// Pessimistic lock on the calling agent's wallet row. Only one
+		// pre-existing row is locked here (the new user row does not exist
+		// yet), so the ascending-lock-order deadlock guardrail is trivially
+		// satisfied.
+		var (
+			role     string
+			isActive bool
+			current  float64
+		)
+		err = tx.QueryRowContext(r.Context(),
+			`SELECT role, current_balance, is_active
+			   FROM users WHERE id = $1 FOR UPDATE`,
+			agentID.UserID,
+		).Scan(&role, &current, &isActive)
+		if isNoRows(err) {
+			writeError(w, http.StatusNotFound, "agent account not found")
+			return
+		}
+		if err != nil {
+			log.Printf("agent: lock agent %d: %v", agentID.UserID, err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if role != "AGENT" && role != "SUPER_ADMIN" {
+			writeError(w, http.StatusForbidden, "only AGENT or SUPER_ADMIN accounts may provision users with a balance")
+			return
+		}
+		if !isActive {
+			writeError(w, http.StatusForbidden, "agent account is suspended; users cannot be created with a balance")
+			return
+		}
+		if current < opening {
+			writeError(w, http.StatusUnprocessableEntity,
+				"agent current balance is insufficient for the requested initial balance")
+			return
+		}
+		agentBalance = current
+	}
+
 	var userID int64
-	err = h.db.QueryRowContext(r.Context(), `
+	err = tx.QueryRowContext(r.Context(), `
 		INSERT INTO users (username, password_hash, name, role, parent_id,
 		                    current_balance, hold_balance, is_active, phone,
 		                    must_change_password)
-		VALUES ($1, $2, $3, 'USER', $4, 0.0, 0.0, TRUE, $5, TRUE)
+		VALUES ($1, $2, $3, 'USER', $4, $5, 0.0, TRUE, $6, TRUE)
 		RETURNING id`,
-		req.Username, string(hash), req.Username, agentID.UserID, req.Phone,
+		req.Username, string(hash), req.Username, agentID.UserID, opening, req.Phone,
 	).Scan(&userID)
 	if err != nil {
 		var pqErr *pq.Error
@@ -79,12 +159,80 @@ func (h *AgentHandler) CreateDownlineUser(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	agentBalanceAfter := 0.0
+	if opening > 0 {
+		amount := decimal.NewFromFloat(opening).Round(2)
+		agentBalanceAfter = decimal.NewFromFloat(agentBalance).
+			Sub(amount).Round(2).InexactFloat64()
+
+		if _, err := tx.ExecContext(r.Context(),
+			`UPDATE users SET current_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+			agentBalanceAfter, agentID.UserID,
+		); err != nil {
+			log.Printf("agent: debit agent %d: %v", agentID.UserID, err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		// Double-entry ledger: credit the new user, debit the agent. The two
+		// amount_changes sum to zero and every leg carries the counterparty.
+		if _, err := tx.ExecContext(r.Context(), `
+			INSERT INTO unit_ledger
+			    (user_id, ref_user_id, request_id, bet_id, type, amount_change,
+			     balance_before, balance_after, description)
+			 VALUES ($1, $2, NULL, NULL, 'DEPOSIT', $3, 0.0, $4, $5)`,
+			userID, agentID.UserID, amount.InexactFloat64(), opening,
+			fmt.Sprintf("Initial balance granted on account creation (Agent %d)", agentID.UserID),
+		); err != nil {
+			log.Printf("agent: user ledger leg: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if _, err := tx.ExecContext(r.Context(), `
+			INSERT INTO unit_ledger
+			    (user_id, ref_user_id, request_id, bet_id, type, amount_change,
+			     balance_before, balance_after, description)
+			 VALUES ($1, $2, NULL, NULL, 'WITHDRAW', $3, $4, $5, $6)`,
+			agentID.UserID, userID, amount.Neg().InexactFloat64(), agentBalance, agentBalanceAfter,
+			fmt.Sprintf("Initial balance top-up to User %d", userID),
+		); err != nil {
+			log.Printf("agent: agent ledger leg: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("agent: commit create user: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"user_id":  userID,
-		"username": req.Username,
-		"phone":    req.Phone,
-		"role":     "USER",
+		"user_id":         userID,
+		"username":        req.Username,
+		"phone":           req.Phone,
+		"role":            "USER",
+		"initial_balance": opening,
+		"user_balance":    opening,
+		"agent_balance":   agentBalanceAfter,
 	})
+}
+
+// validateWalletAmount normalises a money amount for wallet writes: NaN/Inf is
+// rejected, negatives are rejected, values beyond NUMERIC(15,2) capacity are
+// rejected, and positive values are rounded to 2dp at the monetary boundary.
+func validateWalletAmount(v float64) (float64, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	if v < 0 {
+		return 0, false
+	}
+	if v > nineTrillion {
+		return 0, false
+	}
+	return decimal.NewFromFloat(v).Round(2).InexactFloat64(), true
 }
 
 type forwardRequest struct {
@@ -719,6 +867,143 @@ func (h *AgentHandler) ToggleAgentUserStatus(w http.ResponseWriter, r *http.Requ
 		"data": map[string]interface{}{
 			"user_id":   req.UserID,
 			"is_active": req.IsActive,
+		},
+	})
+}
+
+type sandboxTestBetRequest struct {
+	UserID       int64   `json:"user_id"`
+	BetType      string  `json:"bet_type"` // BODY | MAUNG
+	TotalStake   float64 `json:"total_stake"`
+	MatchID      int64   `json:"match_id"`
+	Pick         string  `json:"pick"` // HOME | AWAY | DRAW | OVER | UNDER
+	BodyOddsType string  `json:"body_odds_type"`
+}
+
+// SandboxTestBet lets an agent run a verified BODY/MAUNG bet-slip against one
+// of its own downline users — the sandbox test-bench trigger. The bet is
+// placed through the exact same atomic wallet engine as a real user wager
+// (row-locked hold allocation + immutable BET_HOLD ledger row), then the
+// handler re-reads the user's wallet and the ledger to prove the hold actually
+// landed. The agent never sees the user's password/session; the bet runs on
+// the user's own balance, so a sandbox slip holding units is fully visible to
+// the end user and settles normally if it goes PENDING -> WIN/LOSE.
+//
+//	POST /api/v1/agent/sandbox/test-bet
+//	{ "user_id": 42, "bet_type": "BODY", "total_stake": 10000,
+//	  "match_id": 7, "pick": "HOME", "body_odds_type": "0+00" }
+func (h *AgentHandler) SandboxTestBet(w http.ResponseWriter, r *http.Request) {
+	agentID, _ := auth.PrincipalFrom(r.Context())
+
+	var req sandboxTestBetRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.UserID <= 0 || req.MatchID <= 0 {
+		writeError(w, http.StatusBadRequest, "user_id and match_id must be positive integers")
+		return
+	}
+
+	placeReq := bet.PlaceBetRequest{
+		BetType:    bet.BetType(strings.ToUpper(strings.TrimSpace(req.BetType))),
+		TotalStake: req.TotalStake,
+		Selections: []bet.Selection{{
+			MatchID:      req.MatchID,
+			Pick:         bet.SelectionPick(strings.ToUpper(strings.TrimSpace(req.Pick))),
+			BodyOddsType: strings.TrimSpace(req.BodyOddsType),
+		}},
+	}
+	if err := placeReq.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Ownership + activity gate: the sandbox only exercises the agent's own
+	// downline, and a suspended user cannot wager (the toggle widget is
+	// exactly what proves the gate by flipping the flag first).
+	var (
+		parentID sql.NullInt64
+		isActive bool
+	)
+	if err := h.db.QueryRowContext(r.Context(),
+		`SELECT parent_id, is_active FROM users WHERE id = $1 AND role = 'USER'`, req.UserID,
+	).Scan(&parentID, &isActive); err != nil {
+		if isNoRows(err) {
+			writeError(w, http.StatusNotFound, "downline user not found")
+			return
+		}
+		log.Printf("agent: sandbox load user %d: %v", req.UserID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if !parentID.Valid || parentID.Int64 != agentID.UserID {
+		writeError(w, http.StatusForbidden, "user is not your downline")
+		return
+	}
+	if !isActive {
+		writeError(w, http.StatusForbidden, "user account is suspended; enable it before running a sandbox bet")
+		return
+	}
+
+	resp, err := bet.NewRepository(h.db).PlaceBet(r.Context(), req.UserID, placeReq)
+	if err != nil {
+		switch {
+		case errors.Is(err, bet.ErrInsufficientBalance):
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, bet.ErrClosedMatch):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, bet.ErrInvalidRequest):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			log.Printf("agent: sandbox bet for user %d: %v", req.UserID, err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+		}
+		return
+	}
+
+	// Post-bet reconciliation: re-read the wallet and the immutable ledger so
+	// the dashboard can show hold allocation and ledger tracking in one pane.
+	var (
+		userCurrent float64
+		userHold    float64
+		ledgerRows  int
+	)
+	if err := h.db.QueryRowContext(r.Context(),
+		`SELECT current_balance, hold_balance FROM users WHERE id = $1`, req.UserID,
+	).Scan(&userCurrent, &userHold); err != nil {
+		log.Printf("agent: sandbox wallet read %d: %v", req.UserID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if err := h.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM unit_ledger WHERE bet_id = $1`, resp.BetID,
+	).Scan(&ledgerRows); err != nil {
+		log.Printf("agent: sandbox ledger read %d: %v", resp.BetID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	balanceReconciled := math.Abs(userCurrent-resp.CurrentBalance) <= 0.005
+	holdReconciled := userHold >= resp.HoldAmount-0.005
+	ledgerVerified := ledgerRows >= 1
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"code":    "SANDBOX_TEST_BET_PLACED",
+		"data": map[string]interface{}{
+			"bet_id":               resp.BetID,
+			"bet_type":             strings.ToUpper(strings.TrimSpace(req.BetType)),
+			"total_stake":          placeReq.TotalStake,
+			"hold_amount":          resp.HoldAmount,
+			"potential_payout":     resp.PotentialPayout,
+			"user_current_balance": userCurrent,
+			"user_hold_balance":    userHold,
+			"ledger_rows":          ledgerRows,
+			"balance_reconciled":   balanceReconciled,
+			"hold_reconciled":      holdReconciled,
+			"ledger_verified":      ledgerVerified,
+			"verified":             balanceReconciled && holdReconciled && ledgerVerified,
 		},
 	})
 }

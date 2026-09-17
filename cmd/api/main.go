@@ -62,10 +62,11 @@ func main() {
 	// the REST + settlement paths keep working exactly as before.
 	redisAddr := redisAddress()
 	var live *websocket.Hub
+	var rdb *redis.Client
 	var onOddsChange func(ctx context.Context, matchID int64, payload interface{})
 
 	if redisAddr != "" {
-		rdb := redis.NewClient(&redis.Options{
+		rdb = redis.NewClient(&redis.Options{
 			Addr:     redisAddr,
 			Password: os.Getenv("REDIS_PASSWORD"),
 		})
@@ -114,7 +115,7 @@ func main() {
 		port = "8080"
 	}
 
-	handler := httpapi.NewRouter(db, jwtSecret, onMatchResult, live, onOddsChange)
+	handler := httpapi.NewRouter(db, jwtSecret, onMatchResult, live, onOddsChange, rdb)
 
 	log.Printf("Server starting on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, handler))

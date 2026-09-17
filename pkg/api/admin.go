@@ -7,24 +7,56 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/lib/pq"
 	"github.com/shopspring/decimal"
 	"golang.org/x/crypto/bcrypt"
 
 	"mogok-maung-backend/pkg/auth"
+	"mogok-maung-backend/pkg/feed"
 	"mogok-maung-backend/pkg/worker"
 )
+
+// FixturesCacheKey backs the GET /api/v1/user/fixtures Redis fast path. The
+// sync pipeline evicts it after every merge so polling clients never re-read a
+// stale slate; the 60s fill TTL bounds staleness between invalidation events.
+const FixturesCacheKey = "mogok:fixtures:active"
+
+// redisKeyDeleter is the minimal Redis surface the admin plane needs for cache
+// eviction (abstracted so the API package does not couple to a concrete client).
+type redisKeyDeleter interface {
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
+}
 
 // AdminHandler exposes SUPER_ADMIN-only control-plane endpoints.
 type AdminHandler struct {
 	db            *sql.DB
 	onOddsChange  func(ctx context.Context, matchID int64, payload interface{})
 	onMatchResult func(ctx context.Context, ev worker.SettlementEvent)
+
+	feedProvider feed.Provider   // nil disables /fixtures/sync (503)
+	cache        redisKeyDeleter // nil disables Redis cache invalidation
+}
+
+// AdminOption configures an AdminHandler beyond the core dependencies.
+type AdminOption func(*AdminHandler)
+
+// WithFeedProvider wires the sports-data provider backing POST /fixtures/sync.
+// Pass nil (or omit the option) to leave sync disabled with a 503 response.
+func WithFeedProvider(p feed.Provider) AdminOption {
+	return func(h *AdminHandler) { h.feedProvider = p }
+}
+
+// WithCache wires the Redis eviction handle used by the sync flow to
+// invalidate the active-fixtures cache key. Omit it to disable invalidation.
+func WithCache(c redisKeyDeleter) AdminOption {
+	return func(h *AdminHandler) { h.cache = c }
 }
 
 // NewAdminHandler builds an AdminHandler. onOddsChange is an optional hook
@@ -34,8 +66,88 @@ type AdminHandler struct {
 // be dispatched to the settlement worker queue; pass nil to skip dispatch.
 func NewAdminHandler(db *sql.DB,
 	onOddsChange func(ctx context.Context, matchID int64, payload interface{}),
-	onMatchResult func(ctx context.Context, ev worker.SettlementEvent)) *AdminHandler {
-	return &AdminHandler{db: db, onOddsChange: onOddsChange, onMatchResult: onMatchResult}
+	onMatchResult func(ctx context.Context, ev worker.SettlementEvent),
+	opts ...AdminOption) *AdminHandler {
+	h := &AdminHandler{db: db, onOddsChange: onOddsChange, onMatchResult: onMatchResult}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
+}
+
+// SyncFixtures pulls the sports-data feed and merges every provider match into
+// the matches table atomically:
+//
+//		POST /api/v1/admin/fixtures/sync
+//
+//	 1. Provider fixtures are downloaded (API-Football, or the mock feed when
+//	    SPORTS_API_MOCK=true) and normalised by pkg/feed.
+//	 2. Each mergeable row is upserted in ONE transaction via
+//	    INSERT ... ON CONFLICT (external_match_id) DO UPDATE — new provider
+//	    matches get fresh local ids (bets/settlements keep referencing them),
+//	    existing ones keep their ids and are refreshed in place. Status and the
+//	    Myanmar odds profile of existing rows are never overwritten by the feed.
+//	 3. Every changed match's live-odds snapshot is fanned out through the
+//	    Redis/WS onOddsChange hook and the active-fixtures cache key is evicted.
+func (h *AdminHandler) SyncFixtures(w http.ResponseWriter, r *http.Request) {
+	if h.feedProvider == nil {
+		writeError(w, http.StatusServiceUnavailable, "fixture sync provider not configured")
+		return
+	}
+
+	driver := feed.NewDriver(h.db, h.feedProvider, nil)
+	rpt, err := driver.Sync(r.Context())
+	if err != nil {
+		switch {
+		case errors.Is(err, feed.ErrProviderNotConfigured):
+			writeError(w, http.StatusServiceUnavailable, "fixture sync provider not configured")
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			writeError(w, http.StatusGatewayTimeout, "fixture sync timed out")
+		default:
+			log.Printf("admin: sync fixtures: %v", err)
+			writeError(w, http.StatusInternalServerError, "fixture sync failed")
+		}
+		return
+	}
+
+	// Fan the freshest live-odds snapshot of every changed match out through
+	// Redis so /ws/live-odds subscribers get the new slate immediately.
+	wsBroadcast := false
+	broadcastCount := 0
+	if h.onOddsChange != nil {
+		for _, id := range rpt.ChangedMatchIDs {
+			h.onOddsChange(r.Context(), id, nil)
+			broadcastCount++
+		}
+		wsBroadcast = true
+	}
+
+	// Evict the active-fixtures cache so polling REST clients re-read the new
+	// slate on their next request.
+	redisInvalidated := false
+	if h.cache != nil {
+		if err := h.cache.Del(r.Context(), FixturesCacheKey).Err(); err != nil {
+			log.Printf("admin: invalidate fixtures cache: %v", err)
+		} else {
+			redisInvalidated = true
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"code":    "FIXTURES_SYNCED",
+		"data": map[string]interface{}{
+			"pulled":             rpt.Pulled,
+			"inserted":           rpt.Inserted,
+			"updated":            rpt.Updated,
+			"skipped":            rpt.Skipped,
+			"changed_matches":    rpt.ChangedMatchIDs,
+			"redis_invalidated":  redisInvalidated,
+			"ws_broadcast_sent":  wsBroadcast,
+			"ws_broadcast_count": broadcastCount,
+			"timestamp":          time.Now().UTC().Format(time.RFC3339),
+		},
+	})
 }
 
 // adminAgent is the control-plane view of an AGENT-role user.
@@ -152,11 +264,17 @@ func (h *AdminHandler) ToggleAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 type createAgentRequest struct {
-	Username string `json:"username"`
-	Name     string `json:"name"`
-	Phone    string `json:"phone"`
-	Password string `json:"password"`
+	Username       string  `json:"username"`
+	Name           string  `json:"name"`
+	Phone          string  `json:"phone"`
+	Password       string  `json:"password"`
+	InitialBalance float64 `json:"initial_balance"`
 }
+
+// nineTrillion is the inclusive ceiling of NUMERIC(15,2) (9999999999999.99).
+// initial_balance is validated against it before it reaches the DB so a
+// bullshit amount returns 400 instead of a generic 500.
+const nineTrillion = 9_999_999_999_999.99
 
 // CreateAgent provisions a new AGENT-role account under the calling SUPER_ADMIN
 // (the first link of the delegation chain: SUPER_ADMIN opens an Agent, the
@@ -164,6 +282,13 @@ type createAgentRequest struct {
 // password is honoured; an empty one falls back to the shared bootstrap
 // credential with must_change_password=TRUE forcing rotation on first login —
 // the same contract agent-provisioned downline users already get.
+//
+// An optional initial_balance opens the agent wallet in the same transaction:
+// the user row is created with current_balance = initial_balance, an
+// auto-approved DEPOSIT unit_request row is appended (so the Super Admin sees
+// the movement in the standard approval queue), and the immutable ledger
+// records the DEPOSIT credit from 0.00 to the opening balance. Everything is
+// atomic — a failure anywhere rolls the whole provisioning back.
 func (h *AdminHandler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	adminID, _ := auth.PrincipalFrom(r.Context())
 
@@ -179,6 +304,19 @@ func (h *AdminHandler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Username) > 50 {
 		writeError(w, http.StatusBadRequest, "username must be 50 characters or fewer")
+		return
+	}
+
+	if math.IsNaN(req.InitialBalance) || math.IsInf(req.InitialBalance, 0) {
+		writeError(w, http.StatusBadRequest, "initial_balance must be a finite amount")
+		return
+	}
+	if req.InitialBalance < 0 {
+		writeError(w, http.StatusBadRequest, "initial_balance must be zero or a positive amount")
+		return
+	}
+	if req.InitialBalance > nineTrillion {
+		writeError(w, http.StatusBadRequest, "initial_balance exceeds NUMERIC(15,2) capacity")
 		return
 	}
 
@@ -214,14 +352,27 @@ func (h *AdminHandler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("admin: create agent begin: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	defer tx.Rollback() // no-op after Commit.
+
+	opening := req.InitialBalance
+	if opening > 0 {
+		opening = decimal.NewFromFloat(opening).Round(2).InexactFloat64()
+	}
+
 	var agentID int64
-	err = h.db.QueryRowContext(r.Context(), `
+	err = tx.QueryRowContext(r.Context(), `
 		INSERT INTO users (username, password_hash, name, role, parent_id,
 		                    current_balance, hold_balance, is_active, phone,
 		                    must_change_password)
-		VALUES ($1, $2, $3, 'AGENT', $4, 0.0, 0.0, TRUE, $5, $6)
+		VALUES ($1, $2, $3, 'AGENT', $4, $5, 0.0, TRUE, $6, $7)
 		RETURNING id`,
-		req.Username, string(hash), name, adminID.UserID, phone, mustChange,
+		req.Username, string(hash), name, adminID.UserID, opening, phone, mustChange,
 	).Scan(&agentID)
 	if err != nil {
 		var pqErr *pq.Error
@@ -234,13 +385,51 @@ func (h *AdminHandler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestID := int64(0)
+	if opening > 0 {
+		// Auto-approved trail row so the opening deposit shows up in the same
+		// unit_requests queue the standard fund-flow uses.
+		if err := tx.QueryRowContext(r.Context(), `
+			INSERT INTO unit_requests (requester_id, approver_id, amount, type, status, updated_at)
+			VALUES ($1, $2, $3, 'DEPOSIT', 'APPROVED', CURRENT_TIMESTAMP)
+			RETURNING id`,
+			agentID, adminID.UserID, opening,
+		).Scan(&requestID); err != nil {
+			log.Printf("admin: create agent request row: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		// Immutable ledger credit: the house funds the new agent wallet.
+		if _, err := tx.ExecContext(r.Context(), `
+			INSERT INTO unit_ledger
+			    (user_id, request_id, bet_id, type, amount_change,
+			     balance_before, balance_after, description)
+			 VALUES ($1, $2, NULL, 'DEPOSIT', $3, 0.0, $4, $5)`,
+			agentID, requestID, opening, opening,
+			"Initial balance on agent account creation",
+		); err != nil {
+			log.Printf("admin: create agent ledger: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("admin: commit create agent: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"success": true,
 		"message": fmt.Sprintf("အေးဂျင့် '%s' အကောင့်ကို အောင်မြင်စွာ ဖွင့်လိုက်ပါပြီ။", req.Username),
 		"data": map[string]interface{}{
-			"agent_id": agentID,
-			"username": req.Username,
-			"role":     "AGENT",
+			"agent_id":        agentID,
+			"username":        req.Username,
+			"role":            "AGENT",
+			"initial_balance": opening,
+			"request_id":      requestID,
 		},
 	})
 }

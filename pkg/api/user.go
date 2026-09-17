@@ -10,18 +10,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"golang.org/x/crypto/bcrypt"
 	"mogok-maung-backend/pkg/auth"
 )
 
+// fixturesCacheTTL bounds how stale a cache-served active-fixtures slate may
+// be between sync-era evictions. Long enough to absorb burst polling load,
+// short enough that the slate is never meaningfully stale.
+const fixturesCacheTTL = 60 * time.Second
+
 // UserHandler exposes authenticated self-service endpoints for the end user.
 type UserHandler struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *redis.Client // nil disables the active-fixtures cache fast path
 }
 
-// NewUserHandler builds a UserHandler.
-func NewUserHandler(db *sql.DB) *UserHandler {
-	return &UserHandler{db: db}
+// NewUserHandler builds a UserHandler. rdb is optional; pass nil to serve the
+// active-fixtures slate straight from PostgreSQL on every request.
+func NewUserHandler(db *sql.DB, rdb *redis.Client) *UserHandler {
+	return &UserHandler{db: db, rdb: rdb}
 }
 
 // GetWallet returns the caller's live balances (used by the mobile dashboard
@@ -112,7 +120,23 @@ func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 // ListActiveFixtures returns every match currently accepting wagers
 // (OPEN / SUSPENDED) for the mobile live feed. Clients either poll this feed or
 // subscribe to the WebSocket gateway for real-time odds deltas.
+//
+// When Redis is configured the serialised slate is cached under FixturesCacheKey
+// (60s TTL): repeat polls within the window are served straight from the cache
+// and the admin sync pipeline evicts the key after every feed merge, so polling
+// clients snap to the fresh slate as soon as a sync lands.
 func (h *UserHandler) ListActiveFixtures(w http.ResponseWriter, r *http.Request) {
+	if h.rdb != nil {
+		if cached, err := h.rdb.Get(r.Context(), FixturesCacheKey).Bytes(); err == nil && len(cached) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write(cached); err != nil {
+				log.Printf("user: write cached fixtures: %v", err)
+			}
+			return
+		}
+	}
+
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id, home_team, away_team, league_name, match_time,
 		       handicap_team, body_odds_type,
@@ -152,7 +176,17 @@ func (h *UserHandler) ListActiveFixtures(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"fixtures": fixtures})
+	payload := map[string]interface{}{"fixtures": fixtures}
+	if h.rdb != nil {
+		blob, err := json.Marshal(payload)
+		if err != nil {
+			log.Printf("user: marshal fixtures cache: %v", err)
+		} else if err := h.rdb.Set(r.Context(), FixturesCacheKey, blob, fixturesCacheTTL).Err(); err != nil {
+			log.Printf("user: set fixtures cache: %v", err)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, payload)
 }
 
 type createUnitRequestRequest struct {

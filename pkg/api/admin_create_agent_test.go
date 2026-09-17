@@ -81,6 +81,16 @@ func TestCreateAgentValidation(t *testing.T) {
 			body:    `{"username":"agentx","phone":"` + strings.Repeat("9", 31) + `"}`,
 			wantErr: "phone must be 30 characters or fewer",
 		},
+		{
+			name:    "negative initial balance",
+			body:    `{"username":"agentx","initial_balance":-100}`,
+			wantErr: "initial_balance must be zero or a positive amount",
+		},
+		{
+			name:    "huge initial balance overflows numeric(15,2)",
+			body:    `{"username":"agentx","initial_balance":10000000000000}`,
+			wantErr: "initial_balance exceeds NUMERIC(15,2) capacity",
+		},
 	}
 
 	for _, tt := range tests {

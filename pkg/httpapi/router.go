@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-redis/redis/v8"
+
 	"mogok-maung-backend/pkg/api"
 	"mogok-maung-backend/pkg/auth"
 	"mogok-maung-backend/pkg/bet"
 	"mogok-maung-backend/pkg/database"
+	"mogok-maung-backend/pkg/feed"
 	"mogok-maung-backend/pkg/models"
 	"mogok-maung-backend/pkg/websocket"
 	"mogok-maung-backend/pkg/worker"
@@ -56,10 +59,15 @@ func healthHandler(db *sql.DB, live *websocket.Hub) http.HandlerFunc {
 // endpoints entirely (no Redis configured). onOddsChange is invoked by the
 // admin endpoints after any status/odds commit so the caller can fan the new
 // snapshot out through Redis; it is ignored when live is nil.
+//
+// rdb is the shared Redis client used for the active-fixtures cache fast path
+// (GET /api/v1/user/fixtures) and its post-sync eviction; pass nil to disable
+// caching while keeping the gateway behaviour driven by `live`.
 func NewRouter(db *sql.DB, jwtSecret string,
 	onMatchResult func(ctx context.Context, ev worker.SettlementEvent),
 	live *websocket.Hub,
-	onOddsChange func(ctx context.Context, matchID int64, payload interface{})) http.Handler {
+	onOddsChange func(ctx context.Context, matchID int64, payload interface{}),
+	rdb *redis.Client) http.Handler {
 	mux := http.NewServeMux()
 
 	// Public endpoints.
@@ -90,7 +98,7 @@ func NewRouter(db *sql.DB, jwtSecret string,
 		auth.Chain(bh.PlaceBet, authMw, pwGuard, anyRole))
 
 	// 1b. User self-service profile.
-	uh := api.NewUserHandler(db)
+	uh := api.NewUserHandler(db, rdb)
 	mux.Handle("GET /api/v1/user/wallet",
 		auth.Chain(uh.GetWallet, authMw, anyRole))
 	mux.Handle("GET /api/v1/user/bets",
@@ -106,9 +114,14 @@ func NewRouter(db *sql.DB, jwtSecret string,
 
 	// 2. Super admin control plane.
 	// onOddsChange fans status/odds updates to the live-odds gateway.
-	ah := api.NewAdminHandler(db, onOddsChange, onMatchResult)
+	// The feed provider + Redis cache handle wire the fixture sync pipeline.
+	ah := api.NewAdminHandler(db, onOddsChange, onMatchResult,
+		api.WithFeedProvider(feed.ProviderFromEnv()),
+		api.WithCache(rdb))
 	mux.Handle("GET /api/v1/admin/fixtures",
 		auth.Chain(ah.ListFixtures, authMw, auth.RequireRole(models.RoleSuperAdmin)))
+	mux.Handle("POST /api/v1/admin/fixtures/sync",
+		auth.Chain(ah.SyncFixtures, authMw, auth.RequireRole(models.RoleSuperAdmin)))
 	mux.Handle("POST /api/v1/admin/fixtures/toggle",
 		auth.Chain(ah.ToggleFixture, authMw, auth.RequireRole(models.RoleSuperAdmin)))
 	mux.Handle("POST /api/v1/admin/fixtures/odds",
@@ -147,6 +160,8 @@ func NewRouter(db *sql.DB, jwtSecret string,
 		auth.Chain(ag.ListAgentUserSummary, authMw, agentRoles))
 	mux.Handle("POST /api/v1/agent/users/toggle",
 		auth.Chain(ag.ToggleAgentUserStatus, authMw, agentRoles))
+	mux.Handle("POST /api/v1/agent/sandbox/test-bet",
+		auth.Chain(ag.SandboxTestBet, authMw, agentRoles))
 	mux.Handle("GET /api/v1/agent/profile/contact-info",
 		auth.Chain(ag.GetAgentContactProfile, authMw, agentRoles))
 	mux.Handle("PUT /api/v1/agent/profile/contact-info",
