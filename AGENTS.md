@@ -70,3 +70,10 @@ correct only for odds/multipliers, not currency.
   header-only checks. `cloudflare-ips.conf` (official ranges) must stay wired
   to `set_real_ip_from` or the CF-Connecting-IP trust is spoofable.
 - Keep `limit_req_status 429` and `server_tokens off`.
+
+## 8. Response Language (Myanmar)
+The user communicates in Myanmar (Burmese). ALL chat responses, status
+updates, explanations and summaries MUST be written in Myanmar (Burmese),
+Mix of Burmese and English/technical terms is fine. Code, comments, commit
+messages stay in English as usual — only the conversational reply to the
+user is in Myanmar. Do not wait for a reminder; apply this to every reply.
