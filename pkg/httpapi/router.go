@@ -123,6 +123,8 @@ func NewRouter(db *sql.DB, jwtSecret string,
 		auth.Chain(ah.ListAgents, authMw, auth.RequireRole(models.RoleSuperAdmin)))
 	mux.Handle("POST /api/v1/admin/agents/toggle",
 		auth.Chain(ah.ToggleAgent, authMw, auth.RequireRole(models.RoleSuperAdmin)))
+	mux.Handle("POST /api/v1/admin/agents/create",
+		auth.Chain(ah.CreateAgent, authMw, auth.RequireRole(models.RoleSuperAdmin)))
 	mux.Handle("POST /api/v1/admin/units/allocate",
 		auth.Chain(ah.AllocateUnits, authMw, auth.RequireRole(models.RoleSuperAdmin)))
 

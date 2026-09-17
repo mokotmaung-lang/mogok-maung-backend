@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/shopspring/decimal"
+	"golang.org/x/crypto/bcrypt"
 
 	"mogok-maung-backend/pkg/auth"
 	"mogok-maung-backend/pkg/worker"
@@ -145,6 +147,100 @@ func (h *AdminHandler) ToggleAgent(w http.ResponseWriter, r *http.Request) {
 		"data": map[string]interface{}{
 			"agent_id": req.AgentID,
 			"status":   status,
+		},
+	})
+}
+
+type createAgentRequest struct {
+	Username string `json:"username"`
+	Name     string `json:"name"`
+	Phone    string `json:"phone"`
+	Password string `json:"password"`
+}
+
+// CreateAgent provisions a new AGENT-role account under the calling SUPER_ADMIN
+// (the first link of the delegation chain: SUPER_ADMIN opens an Agent, the
+// Agent opens Users and splits received units downline). A playwright-provided
+// password is honoured; an empty one falls back to the shared bootstrap
+// credential with must_change_password=TRUE forcing rotation on first login —
+// the same contract agent-provisioned downline users already get.
+func (h *AdminHandler) CreateAgent(w http.ResponseWriter, r *http.Request) {
+	adminID, _ := auth.PrincipalFrom(r.Context())
+
+	var req createAgentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" {
+		writeError(w, http.StatusBadRequest, "username is required")
+		return
+	}
+	if len(req.Username) > 50 {
+		writeError(w, http.StatusBadRequest, "username must be 50 characters or fewer")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = req.Username
+	}
+	if len(name) > 100 {
+		writeError(w, http.StatusBadRequest, "name must be 100 characters or fewer")
+		return
+	}
+
+	phone := strings.TrimSpace(req.Phone)
+	if len(phone) > 30 {
+		writeError(w, http.StatusBadRequest, "phone must be 30 characters or fewer")
+		return
+	}
+
+	password := req.Password
+	mustChange := false
+	if password == "" {
+		password = DefaultDownlinePassword
+		mustChange = true
+	} else if len(password) < 8 {
+		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("admin: hash agent password: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	var agentID int64
+	err = h.db.QueryRowContext(r.Context(), `
+		INSERT INTO users (username, password_hash, name, role, parent_id,
+		                    current_balance, hold_balance, is_active, phone,
+		                    must_change_password)
+		VALUES ($1, $2, $3, 'AGENT', $4, 0.0, 0.0, TRUE, $5, $6)
+		RETURNING id`,
+		req.Username, string(hash), name, adminID.UserID, phone, mustChange,
+	).Scan(&agentID)
+	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" { // unique_violation
+			writeError(w, http.StatusConflict, "username already exists")
+			return
+		}
+		log.Printf("admin: create agent: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("အေးဂျင့် '%s' အကောင့်ကို အောင်မြင်စွာ ဖွင့်လိုက်ပါပြီ။", req.Username),
+		"data": map[string]interface{}{
+			"agent_id": agentID,
+			"username": req.Username,
+			"role":     "AGENT",
 		},
 	})
 }
