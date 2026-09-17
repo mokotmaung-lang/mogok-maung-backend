@@ -9,6 +9,7 @@ import 'core/theme/app_theme.dart';
 import 'core/widgets/offline_banner_builder.dart';
 import 'features/auth/presentation/screens/force_password_change_screen.dart';
 import 'features/auth/presentation/screens/login_screen.dart';
+import 'features/admin_dashboard/presentation/screens/admin_dashboard_screen.dart';
 import 'features/dashboard/presentation/screens/dashboard_screen.dart';
 
 Future<void> main() async {
@@ -47,6 +48,7 @@ class MogokMaungApp extends StatelessWidget {
 /// Session-driven router:
 ///  - no session        -> LoginScreen
 ///  - must change pw    -> ForcePasswordChangeScreen (backend blocks betting)
+///  - SUPER_ADMIN/ADMIN -> AdminDashboardScreen (control plane)
 ///  - otherwise         -> DashboardScreen with live wallet binding
 class AuthGate extends ConsumerWidget {
   const AuthGate({super.key});
@@ -68,6 +70,9 @@ class AuthGate extends ConsumerWidget {
     }
     if (session.mustChangePassword) {
       return const ForcePasswordChangeScreen();
+    }
+    if (session.role == 'SUPER_ADMIN' || session.role == 'ADMIN') {
+      return AdminDashboardScreen(username: session.username, role: session.role);
     }
     return const DashboardScreen();
   }

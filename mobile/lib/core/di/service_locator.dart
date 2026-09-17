@@ -3,6 +3,10 @@ import 'package:get_it/get_it.dart';
 import '../config/app_config.dart';
 import '../network/api_client.dart';
 import '../network/live_odds_client.dart';
+import '../../features/admin_dashboard/data/datasources/admin_remote_ds.dart';
+import '../../features/admin_dashboard/data/repositories/admin_repository_impl.dart';
+import '../../features/admin_dashboard/domain/repositories/admin_repository.dart';
+import '../../features/admin_dashboard/domain/usecases/get_admin_dashboard_stats.dart';
 import '../../features/betting/data/repositories/odds_repository_impl.dart';
 import '../../features/betting/domain/repositories/odds_repository.dart';
 import '../../features/history/data/bet_history_repository.dart';
@@ -46,6 +50,15 @@ void setupServiceLocator() {
     () => UnitRequestRepository(
       client: ApiClient(baseUrl: AppConfig.apiBaseUrl, token: _sessionToken),
     ),
+  );
+  sl.registerLazySingleton<AdminRemoteDataSource>(
+    () => AdminRemoteDataSource(tokenProvider: () => _sessionToken),
+  );
+  sl.registerLazySingleton<AdminRepository>(
+    () => AdminRepositoryImpl(sl<AdminRemoteDataSource>()),
+  );
+  sl.registerLazySingleton<GetAdminDashboardStats>(
+    () => GetAdminDashboardStats(sl<AdminRepository>()),
   );
 }
 
