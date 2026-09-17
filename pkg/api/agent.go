@@ -26,6 +26,13 @@ import (
 // login.
 const DefaultDownlinePassword = "Default@123"
 
+// downlineNotYours is the canonical 403 body when an agent targets a user that
+// is not one of its own downlines (Strict Tenant Isolation Law). Kept as a
+// single constant so the allocate-units guard, the direct transfer, the
+// unit-request relay, the toggle and the sandbox bench all surface the same
+// message.
+const downlineNotYours = "ခွင့်ပြုချက်မရှိပါ။ ဤယူဆာသည် သင်၏လက်အောက်ခံ (Downline) မဟုတ်ပါ။"
+
 // AgentHandler exposes AGENT-tier management endpoints.
 type AgentHandler struct {
 	db *sql.DB
@@ -275,7 +282,7 @@ func (h *AgentHandler) CreateUnitRequest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !parentID.Valid || parentID.Int64 != agentID.UserID {
-		writeError(w, http.StatusForbidden, "user is not your downline")
+		writeError(w, http.StatusForbidden, downlineNotYours)
 		return
 	}
 
@@ -361,7 +368,7 @@ func (h *AgentHandler) TransferDownlineUnits(w http.ResponseWriter, r *http.Requ
 						"ယူဆာ လက်ကျန် Unit မလုံလောက်ပါ (Insufficient User Balance)")
 				}
 			case errors.Is(terr, wallet.ErrHierarchyViolation):
-				writeError(w, http.StatusForbidden, "user is not your downline")
+				writeError(w, http.StatusForbidden, downlineNotYours)
 			case errors.Is(terr, wallet.ErrInvalidAmount):
 				writeError(w, http.StatusBadRequest, terr.Error())
 			case errors.Is(terr, wallet.ErrInvalidDirection):
@@ -391,6 +398,151 @@ func (h *AgentHandler) TransferDownlineUnits(w http.ResponseWriter, r *http.Requ
 		"message": message,
 		"data": map[string]interface{}{
 			"user_id":       req.UserID,
+			"amount":        req.Amount,
+			"type":          trxType,
+			"agent_balance": res.AgentBalance,
+			"user_balance":  res.UserBalance,
+		},
+	})
+}
+
+type allocateDownlineUnitsRequest struct {
+	Amount float64 `json:"amount"`
+	Type   string  `json:"type"` // DEPOSIT (agent -> user) | WITHDRAW (user -> agent)
+	Note   string  `json:"note"` // optional free-text context for the ledger
+}
+
+// AllocateDownlineUnits is the strict-tenant unit allocation endpoint an agent
+// uses to move units between its own balance and one of its downline users:
+//
+//	POST /api/v1/agent/users/{id}/allocate-units
+//	{ "amount": 50000, "type": "DEPOSIT" | "WITHDRAW", "note": "..." }
+//
+// One secure transaction drives the whole request: the calling agent and the
+// target user rows are locked FOR UPDATE (ascending user_id — deadlock
+// guardrail), an explicit hierarchy mapping check runs first
+// (`id = $1 AND parent_id = $2 AND role = 'USER'`), then the fixed-point
+// balance movement and the double-entry ledger complete through
+// wallet.ApplyTransfer inside the same tx. Any mapping failure returns 403 with
+// the canonical downline message. Target users NOT owned by the calling agent
+// are completely unreachable.
+func (h *AgentHandler) AllocateDownlineUnits(w http.ResponseWriter, r *http.Request) {
+	targetUserID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || targetUserID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid user id path parameter")
+		return
+	}
+	agentID, _ := auth.PrincipalFrom(r.Context())
+	if agentID.UserID == targetUserID {
+		writeError(w, http.StatusBadRequest, "cannot allocate units to yourself")
+		return
+	}
+
+	var req allocateDownlineUnitsRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<18)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Amount <= 0 {
+		writeError(w, http.StatusBadRequest, "amount must be greater than zero")
+		return
+	}
+	req.Note = strings.TrimSpace(req.Note)
+	if len(req.Note) > 500 {
+		writeError(w, http.StatusBadRequest, "note must be 500 characters or fewer")
+		return
+	}
+	trxType := strings.ToUpper(strings.TrimSpace(req.Type))
+	if trxType != "DEPOSIT" && trxType != "WITHDRAW" {
+		writeError(w, http.StatusBadRequest, "type must be DEPOSIT or WITHDRAW")
+		return
+	}
+
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("agent: allocate begin tx: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	defer tx.Rollback() // no-op after Commit.
+
+	// Explicit hierarchy mapping validation inside the enclosing transaction.
+	// Strict Tenant Isolation Law: the target must be a USER whose parent_id is
+	// an EXACT match to the calling agent's id.
+	var isDownline bool
+	err = tx.QueryRowContext(r.Context(),
+		`SELECT EXISTS(
+		     SELECT 1 FROM users
+		      WHERE id = $1 AND parent_id = $2 AND role = 'USER'
+		   )`, targetUserID, agentID.UserID,
+	).Scan(&isDownline)
+	if err != nil {
+		log.Printf("agent: allocate hierarchy check %d: %v", targetUserID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if !isDownline {
+		writeError(w, http.StatusForbidden, downlineNotYours)
+		return
+	}
+
+	res, err := wallet.ApplyTransfer(r.Context(), tx, wallet.TransferRequest{
+		AgentID:     agentID.UserID,
+		UserID:      targetUserID,
+		Amount:      req.Amount,
+		Direction:   wallet.Direction(trxType),
+		Description: req.Note,
+	})
+	if err != nil {
+		var terr wallet.TransferError
+		switch {
+		case errors.As(err, &terr):
+			switch {
+			case errors.Is(terr, wallet.ErrInsufficientBalance):
+				if trxType == "DEPOSIT" {
+					writeError(w, http.StatusUnprocessableEntity,
+						"လက်ကျန် Unit မလုံလောက်ပါ။ Admin ထံ Unit တောင်းဆိုပါ (Insufficient Agent Balance)")
+				} else {
+					writeError(w, http.StatusUnprocessableEntity,
+						"ယူဆာ လက်ကျန် Unit မလုံလောက်ပါ (Insufficient User Balance)")
+				}
+			case errors.Is(terr, wallet.ErrHierarchyViolation):
+				writeError(w, http.StatusForbidden, downlineNotYours)
+			case errors.Is(terr, wallet.ErrInvalidAmount):
+				writeError(w, http.StatusBadRequest, terr.Error())
+			case errors.Is(terr, wallet.ErrInvalidDirection):
+				writeError(w, http.StatusBadRequest, terr.Error())
+			default:
+				log.Printf("agent: allocate units to %d: %v", targetUserID, err)
+				writeError(w, http.StatusInternalServerError, "internal server error")
+			}
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, "downline user not found")
+		default:
+			log.Printf("agent: allocate units to %d: %v", targetUserID, err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+		}
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("agent: allocate commit %d: %v", targetUserID, err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	var message string
+	if trxType == "DEPOSIT" {
+		message = fmt.Sprintf("ယူဆာ ထံ ယူနစ် %.2f ထည့်သွင်းပြီးပါပြီ (Agent → Downline)", req.Amount)
+	} else {
+		message = fmt.Sprintf("ယူဆာ ထံမှ ယူနစ် %.2f ပြန်ရယူပြီးပါပြီ (Downline → Agent)", req.Amount)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": message,
+		"data": map[string]interface{}{
+			"user_id":       targetUserID,
 			"amount":        req.Amount,
 			"type":          trxType,
 			"agent_balance": res.AgentBalance,
@@ -838,7 +990,7 @@ func (h *AgentHandler) ToggleAgentUserStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !parentID.Valid || parentID.Int64 != agentID.UserID {
-		writeError(w, http.StatusForbidden, "user is not your downline")
+		writeError(w, http.StatusForbidden, downlineNotYours)
 		return
 	}
 
@@ -938,7 +1090,7 @@ func (h *AgentHandler) SandboxTestBet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !parentID.Valid || parentID.Int64 != agentID.UserID {
-		writeError(w, http.StatusForbidden, "user is not your downline")
+		writeError(w, http.StatusForbidden, downlineNotYours)
 		return
 	}
 	if !isActive {

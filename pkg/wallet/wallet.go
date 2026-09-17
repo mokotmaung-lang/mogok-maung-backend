@@ -25,6 +25,16 @@ type Engine struct {
 	DB *sql.DB
 }
 
+// queryer is the minimal SQL surface the wallet engine needs; both *sql.DB and
+// *sql.Tx implement it, so a transfer can run either standalone (own
+// transaction, see TransferUnits) or inside a caller-provided transaction
+// (see ApplyTransfer — used by handlers that pair an explicit hierarchy guard
+// with the atomic movement).
+type queryer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
 // Direction indicates which way units move between an agent and one of its
 // downline users.
 type Direction string
@@ -95,6 +105,34 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*Trans
 	}
 	defer tx.Rollback()
 
+	res, err := ApplyTransfer(ctx, tx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transfer: %w", err)
+	}
+	return res, nil
+}
+
+// ApplyTransfer performs an atomic [TransferRequest] inside the given queryer.
+// Handlers that already own a transaction (for example the agent unit
+// allocation endpoint, which runs an explicit hierarchy guard inside the same
+// tx) pass their *sql.Tx here so the movement shares their ACID boundary.
+//
+// All affected rows are locked in ascending user_id order (see the deadlock
+// guardrail on TransferUnits), roles and the parent_id hierarchy are verified
+// under the locks, balances move in fixed-point decimal, and the double-entry
+// unit_ledger rows are appended. Callers must Commit (and Rollback on error).
+func ApplyTransfer(ctx context.Context, q queryer, req TransferRequest) (*TransferResult, error) {
+	if req.Amount <= 0 {
+		return nil, ErrInvalidAmount
+	}
+	if req.Direction != DirectionDeposit && req.Direction != DirectionWithdraw {
+		return nil, ErrInvalidDirection
+	}
+
 	// 1. Lock both affected rows in ascending user_id order (see guardrail
 	//    comment). Reuse a small struct so the two rows are validated together
 	//    after both locks are held.
@@ -112,7 +150,7 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*Trans
 	rows := make(map[int64]walletRow, 2)
 	for _, id := range lockOrder {
 		var row walletRow
-		err = tx.QueryRowContext(ctx,
+		err := q.QueryRowContext(ctx,
 			`SELECT id, role, current_balance, parent_id
 			   FROM users
 			  WHERE id = $1
@@ -169,14 +207,14 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*Trans
 	userBalAfter := newUserBal.InexactFloat64()
 
 	// 3. Update Balances.
-	_, err = tx.ExecContext(ctx,
+	_, err := q.ExecContext(ctx,
 		`UPDATE users SET current_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
 		agentBalAfter, req.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update agent balance: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
+	_, err = q.ExecContext(ctx,
 		`UPDATE users SET current_balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
 		userBalAfter, req.UserID)
 	if err != nil {
@@ -195,7 +233,7 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*Trans
 	switch req.Direction {
 	case DirectionDeposit:
 		// Agent Ledger (Negative Change — debit).
-		if _, err := tx.ExecContext(ctx, ledgerQuery,
+		if _, err := q.ExecContext(ctx, ledgerQuery,
 			req.AgentID, req.UserID, "WITHDRAW", amount.Neg().InexactFloat64(),
 			agent.balance, agentBalAfter,
 			ledgerDescription("Transfer to User %d", req.UserID, req.Description),
@@ -203,7 +241,7 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*Trans
 			return nil, fmt.Errorf("agent ledger write failed: %w", err)
 		}
 		// User Ledger (Positive Change — credit).
-		if _, err := tx.ExecContext(ctx, ledgerQuery,
+		if _, err := q.ExecContext(ctx, ledgerQuery,
 			req.UserID, req.AgentID, "DEPOSIT", amount.InexactFloat64(),
 			user.balance, userBalAfter,
 			ledgerDescription("Transfer from Agent %d", req.AgentID, req.Description),
@@ -212,7 +250,7 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*Trans
 		}
 	case DirectionWithdraw:
 		// User Ledger first (debit from the user's balance).
-		if _, err := tx.ExecContext(ctx, ledgerQuery,
+		if _, err := q.ExecContext(ctx, ledgerQuery,
 			req.UserID, req.AgentID, "WITHDRAW", amount.Neg().InexactFloat64(),
 			user.balance, userBalAfter,
 			ledgerDescription("Transfer back to Agent %d", req.AgentID, req.Description),
@@ -220,17 +258,13 @@ func (w *Engine) TransferUnits(ctx context.Context, req TransferRequest) (*Trans
 			return nil, fmt.Errorf("user ledger write failed: %w", err)
 		}
 		// Agent Ledger (credit back to the agent's balance).
-		if _, err := tx.ExecContext(ctx, ledgerQuery,
+		if _, err := q.ExecContext(ctx, ledgerQuery,
 			req.AgentID, req.UserID, "DEPOSIT", amount.InexactFloat64(),
 			agent.balance, agentBalAfter,
 			ledgerDescription("Transfer from User %d", req.UserID, req.Description),
 		); err != nil {
 			return nil, fmt.Errorf("agent ledger write failed: %w", err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transfer: %w", err)
 	}
 
 	return &TransferResult{AgentBalance: agentBalAfter, UserBalance: userBalAfter}, nil

@@ -25,6 +25,13 @@ func newAgentCreateHandlerForTest() http.Handler {
 	return mux
 }
 
+func newAgentAllocateHandlerForTest() http.Handler {
+	h := NewAgentHandler(nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /users/{id}/allocate-units", h.AllocateDownlineUnits)
+	return mux
+}
+
 func doPostPath(t *testing.T, h http.Handler, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "http://example.com"+path, strings.NewReader(body))
@@ -72,6 +79,66 @@ func TestCreateDownlineUserValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := doPostPath(t, h, "/create", tt.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+			if errMsg := readErr(t, rec); errMsg != tt.wantErr {
+				t.Fatalf("error = %q, want %q", errMsg, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAllocateDownlineUnitsValidation(t *testing.T) {
+	h := newAgentAllocateHandlerForTest()
+
+	tests := []struct {
+		name    string
+		path    string
+		body    string
+		wantErr string
+	}{
+		{
+			name:    "non-numeric id",
+			path:    "/users/abc/allocate-units",
+			body:    `{"amount":100,"type":"DEPOSIT"}`,
+			wantErr: "invalid user id path parameter",
+		},
+		{
+			name:    "zero id",
+			path:    "/users/0/allocate-units",
+			body:    `{"amount":100,"type":"DEPOSIT"}`,
+			wantErr: "invalid user id path parameter",
+		},
+		{
+			name:    "invalid json",
+			path:    "/users/3/allocate-units",
+			body:    `{not json`,
+			wantErr: "invalid JSON body",
+		},
+		{
+			name:    "zero amount",
+			path:    "/users/3/allocate-units",
+			body:    `{"amount":0,"type":"DEPOSIT"}`,
+			wantErr: "amount must be greater than zero",
+		},
+		{
+			name:    "invalid type",
+			path:    "/users/3/allocate-units",
+			body:    `{"amount":100,"type":"CREDIT"}`,
+			wantErr: "type must be DEPOSIT or WITHDRAW",
+		},
+		{
+			name:    "note too long",
+			path:    "/users/3/allocate-units",
+			body:    `{"amount":100,"type":"DEPOSIT","note":"` + strings.Repeat("a", 501) + `"}`,
+			wantErr: "note must be 500 characters or fewer",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doPostPath(t, h, tt.path, tt.body)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 			}

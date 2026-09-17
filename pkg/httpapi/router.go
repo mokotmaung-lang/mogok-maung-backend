@@ -154,6 +154,8 @@ func NewRouter(db *sql.DB, jwtSecret string,
 		auth.Chain(ag.CreateAgentUnitRequest, authMw, agentRoles))
 	mux.Handle("POST /api/v1/agent/units/transfer",
 		auth.Chain(ag.TransferDownlineUnits, authMw, agentRoles))
+	mux.Handle("POST /api/v1/agent/users/{id}/allocate-units",
+		auth.Chain(ag.AllocateDownlineUnits, authMw, agentRoles))
 	mux.Handle("GET /api/v1/agent/downlines",
 		auth.Chain(ag.ListDownlines, authMw, agentRoles))
 	mux.Handle("GET /api/v1/agent/users/summary",
