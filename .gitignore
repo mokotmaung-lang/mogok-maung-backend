@@ -66,3 +66,6 @@ mobile/windows/flutter/generated_plugins.cmake
 
 # Mobile is a separate repo
 mobile/
+
+# Mobile is a separate repo
+mobile/
