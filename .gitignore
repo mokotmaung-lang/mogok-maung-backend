@@ -124,3 +124,6 @@ reset_password.sql
 .opencode.json
 .github/agents/
 .github/instructions/
+
+# Generated files
+hash_gen.go
