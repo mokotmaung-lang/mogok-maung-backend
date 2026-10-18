@@ -63,3 +63,6 @@ mobile/ios/Runner/GeneratedPluginRegistrant.m
 mobile/windows/flutter/generated_plugin_registrant.cc
 mobile/windows/flutter/generated_plugin_registrant.h
 mobile/windows/flutter/generated_plugins.cmake
+
+# Mobile is a separate repo
+mobile/
