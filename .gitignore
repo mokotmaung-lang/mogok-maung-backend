@@ -69,3 +69,58 @@ mobile/
 
 # Mobile is a separate repo
 mobile/
+
+# Backup folders
+lib_backup/
+*.bak
+
+# Large files
+*.vsix
+*.exe
+
+# Local config / secrets
+.env
+.env.*
+login.json
+reset_password.sql
+
+# IDE / tooling
+.opencode.json
+.github/agents/
+.github/instructions/
+
+# Build artifacts
+**/obj/
+**/bin/
+
+# Build artifacts
+**/obj/
+**/bin/
+
+# Build artifacts
+**/obj/
+**/bin/
+
+# Build artifacts
+**/obj/
+**/bin/
+
+# Backup folders
+lib_backup/
+*.bak
+
+# Large files
+*.vsix
+*.exe
+Docker Desktop Installer.exe
+
+# Local config / secrets
+.env
+.env.*
+login.json
+reset_password.sql
+
+# IDE / tooling
+.opencode.json
+.github/agents/
+.github/instructions/
